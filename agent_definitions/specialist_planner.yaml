@@ -1,0 +1,57 @@
+name: planner
+version: "1.0"
+description: >
+  Coordinator agent for the Smartinerary travel platform.
+  Receives a natural-language travel request, decomposes it into flight,
+  accommodation, and dining sub-tasks, delegates to specialist agents,
+  and synthesises the results into a structured day-by-day itinerary.
+
+output_schema_variant: full_v1
+runtime_profile: coordinator
+
+llm:
+  lane: reasoning                        # Claude Opus — strongest for multi-step planning
+  temperature: 0.3
+  max_tokens_per_call: 8000
+  prompt_templates_dir: "prompts/agents/planner"
+
+graph:
+  max_depth: 3
+  hop_budget: 30
+  max_queries: 10
+  allowed_node_labels:
+    - Itinerary
+    - Destination
+    - Traveler
+    - Booking
+  allowed_cypher_templates: []
+
+tool_calling:
+  enabled: true
+  max_tool_iterations: 10               # up to 10 tool calls per planning turn
+  max_llm_calls: 15
+  max_cost_usd: 1.50
+  # These will resolve to ask_flight, ask_hotel, ask_restaurant once those
+  # specialist agents are registered in the AgentRegistry.
+  enabled_tools:
+    - ask_flight
+    - ask_hotel
+    - ask_restaurant
+
+budget:
+  max_cost_usd: 2.00
+  max_tokens_total: 120000
+  max_tokens_input: 100000
+  max_tokens_output: 20000
+  max_llm_calls: 20
+  on_budget_exceeded: return_partial
+
+conversation:
+  max_history_turns: 15
+  ceiling_max_messages: 50
+  ceiling_max_tokens: 150000
+
+observability:
+  langfuse_session_tag: planner
+  trace_cypher_queries: false
+  log_level: INFO

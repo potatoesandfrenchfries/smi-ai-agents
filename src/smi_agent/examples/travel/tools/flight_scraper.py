@@ -1,0 +1,213 @@
+"""Flight search tool — scrapes/queries for available flights on a given route.
+
+Prototype implementation: attempts a real HTTP request to a public flight data
+source, falls back to seeded mock data so the agent always has something to
+work with during development.
+
+Sort options:
+    cost      — cheapest fare first
+    comfort   — fewest stops first, then full-service carriers
+    time      — shortest total journey time first
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import random
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Data shapes
+# ---------------------------------------------------------------------------
+
+AIRLINES = ["British Airways", "easyJet", "Ryanair", "Lufthansa", "KLM", "Air France"]
+AIRCRAFT = ["Boeing 737", "Airbus A320", "Airbus A321", "Boeing 787", "Embraer E190"]
+
+# Prototype base prices per route segment (GBP) — seeded so same route = same data
+_BASE_PRICES = {"short": 60, "medium": 150, "long": 350}
+
+
+def _route_length(origin: str, destination: str) -> str:
+    """Rough heuristic: classify route as short/medium/long for mock pricing."""
+    european = {"EDI", "LHR", "LGW", "CDG", "AMS", "FRA", "MAD", "BCN", "FCO", "DUB"}
+    o, d = origin.upper()[:3], destination.upper()[:3]
+    if o in european and d in european:
+        return "short"
+    if "JFK" in (o, d) or "LAX" in (o, d) or "DXB" in (o, d):
+        return "long"
+    return "medium"
+
+
+def _seeded_flights(origin: str, destination: str, date: str) -> list[dict[str, Any]]:
+    """Generate deterministic mock flight results seeded from route + date."""
+    seed = int(hashlib.md5(f"{origin}{destination}{date}".encode()).hexdigest(), 16)
+    rng = random.Random(seed)
+
+    length = _route_length(origin, destination)
+    base_price = _BASE_PRICES[length]
+
+    results = []
+    # Generate 5 mock flights at different departure times
+    for i, hour in enumerate([6, 9, 12, 15, 19]):
+        airline = rng.choice(AIRLINES)
+        stops = rng.choices([0, 1, 2], weights=[60, 30, 10])[0]
+        duration_min = {"short": 90, "medium": 480, "long": 660}[length] + stops * 90 + rng.randint(-20, 30)
+        price = round(base_price * rng.uniform(0.8, 2.2) * (1 + stops * 0.15), 2)
+        dep_h, dep_m = hour, rng.choice([0, 15, 30, 45])
+        arr_total = dep_h * 60 + dep_m + duration_min
+        arr_h, arr_m = (arr_total // 60) % 24, arr_total % 60
+
+        results.append({
+            "id": f"FLT-{seed % 10000:04d}-{i}",
+            "airline": airline,
+            "aircraft": rng.choice(AIRCRAFT),
+            "origin": origin.upper()[:3],
+            "destination": destination.upper()[:3],
+            "date": date,
+            "departure": f"{date}T{dep_h:02d}:{dep_m:02d}",
+            "arrival": f"{date}T{arr_h:02d}:{arr_m:02d}",
+            "duration_min": duration_min,
+            "stops": stops,
+            "price_gbp": price,
+            "cabin": "economy",
+            "seats_remaining": rng.randint(1, 50),
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Public tool function
+# ---------------------------------------------------------------------------
+
+async def search_flights(
+    origin: str,
+    destination: str,
+    date: str,
+    sort_by: str = "cost",
+    num_results: int = 5,
+) -> list[dict[str, Any]]:
+    """Search for available flights on a route.
+
+    Prototype: tries a lightweight HTTP scrape first; falls back to mock data.
+
+    Args:
+        origin:      IATA airport code or city name (e.g. "EDI", "Edinburgh").
+        destination: IATA airport code or city name (e.g. "LHR", "London").
+        date:        Departure date in YYYY-MM-DD format.
+        sort_by:     Ranking preference — "cost", "comfort", or "time".
+        num_results: Maximum number of results to return (default 5).
+
+    Returns:
+        List of flight dicts, each with: id, airline, origin, destination,
+        departure, arrival, duration_min, stops, price_gbp, seats_remaining.
+    """
+    flights = await _fetch_flights(origin, destination, date)
+    flights = _sort(flights, sort_by)
+    return flights[:num_results]
+
+
+async def _fetch_flights(origin: str, destination: str, date: str) -> list[dict[str, Any]]:
+    """Attempt real HTTP fetch; fall back to mock data on any failure."""
+    try:
+        import httpx  # optional dep — in 'conversation' extra
+
+        # Prototype target: AviationStack free tier (no key needed for basic routes)
+        # Replace with a real API or scraping target in production.
+        url = (
+            "https://api.aviationstack.com/v1/flights"
+            f"?dep_iata={origin.upper()[:3]}&arr_iata={destination.upper()[:3]}"
+            f"&flight_date={date}&limit={10}"
+        )
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                data = response.json().get("data", [])
+                if data:
+                    return _normalise_aviationstack(data)
+    except Exception as exc:
+        logger.debug("Flight HTTP fetch failed (%s) — using mock data", exc)
+
+    return _seeded_flights(origin, destination, date)
+
+
+def _normalise_aviationstack(raw: list[dict]) -> list[dict[str, Any]]:
+    """Map AviationStack response fields to our internal flight schema."""
+    results = []
+    for f in raw:
+        dep = f.get("departure", {})
+        arr = f.get("arrival", {})
+        results.append({
+            "id": f.get("flight", {}).get("iata", "UNK"),
+            "airline": f.get("airline", {}).get("name", "Unknown"),
+            "aircraft": f.get("aircraft", {}).get("iata", "Unknown"),
+            "origin": dep.get("iata", ""),
+            "destination": arr.get("iata", ""),
+            "date": (dep.get("scheduled") or "")[:10],
+            "departure": dep.get("scheduled", ""),
+            "arrival": arr.get("scheduled", ""),
+            "duration_min": None,   # not provided by this endpoint
+            "stops": 0,
+            "price_gbp": None,      # AviationStack free tier has no pricing
+            "cabin": "economy",
+            "seats_remaining": None,
+        })
+    return results
+
+
+def _sort(flights: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
+    """Sort flight results by the requested priority."""
+    if sort_by == "cost":
+        return sorted(flights, key=lambda f: f.get("price_gbp") or float("inf"))
+    if sort_by == "comfort":
+        # Fewest stops first; then cheapest within same stop count
+        return sorted(flights, key=lambda f: (f.get("stops", 99), f.get("price_gbp") or float("inf")))
+    if sort_by == "time":
+        return sorted(flights, key=lambda f: f.get("duration_min") or float("inf"))
+    return flights
+
+
+# ---------------------------------------------------------------------------
+# OpenAI function-calling schema (registered with ToolRegistry)
+# ---------------------------------------------------------------------------
+
+SEARCH_FLIGHTS_TOOL_DEF = {
+    "type": "function",
+    "function": {
+        "name": "search_flights",
+        "description": (
+            "Search for available flights between two airports on a given date. "
+            "Returns a ranked list of flight options with price, duration, and stops."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "Departure airport IATA code or city name (e.g. 'EDI', 'Edinburgh')",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "Arrival airport IATA code or city name (e.g. 'LHR', 'London')",
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Departure date in YYYY-MM-DD format",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["cost", "comfort", "time"],
+                    "description": "Ranking preference. Default is 'cost'.",
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 5)",
+                },
+            },
+            "required": ["origin", "destination", "date"],
+        },
+    },
+}

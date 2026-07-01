@@ -1,0 +1,38 @@
+name: restaurant
+version: "1.0"
+description: >
+  Restaurant specialist for the Smartinerary platform.
+  Given a location and optional cuisine preference, finds and ranks
+  restaurant options by rating, price, or cuisine match.
+
+output_schema_variant: full_v1
+runtime_profile: workflow
+
+llm:
+  lane: triage                           # Haiku — simpler task, fast and cheap
+  temperature: 0.2
+  max_tokens_per_call: 2000
+  prompt_templates_dir: "prompts/agents/restaurant"
+
+graph:
+  allowed_cypher_templates: []
+
+tool_calling:
+  enabled: true
+  max_tool_iterations: 3
+  max_llm_calls: 5
+  max_cost_usd: 0.15
+  enabled_tools:
+    - search_restaurants
+
+budget:
+  max_cost_usd: 0.25
+  max_tokens_total: 20000
+  max_tokens_input: 16000
+  max_tokens_output: 4000
+  max_llm_calls: 6
+  on_budget_exceeded: return_partial
+
+observability:
+  langfuse_session_tag: restaurant
+  log_level: INFO

@@ -1,0 +1,23 @@
+Generate an AI insights template for the travel domain context page.
+
+Context type: {{ context_type }}
+{% if entity_id %}Entity ID: {{ entity_id }}{% endif %}
+{% if label %}Label: {{ label }}{% endif %}
+
+Create a structured template with:
+1. A concise summary of what this page shows
+2. Key synthesis bullets from available data
+3. Context chips (short labels with icons)
+4. Suggested questions the user can ask
+5. An input placeholder text
+
+Return as JSON: {
+  "summary": "...",
+  "recommendation": "...",
+  "synthesisBullets": [{"text": "..."}],
+  "contextChips": [{"label": "...", "icon": "plane|hotel|dollar|star|map-pin|list|chart|building|tag"}],
+  "suggestions": ["question 1?", "question 2?"],
+  "inputPlaceholder": "Ask about..."
+}
+
+IMPORTANT: NO emojis. NO markdown fences. Valid JSON only.

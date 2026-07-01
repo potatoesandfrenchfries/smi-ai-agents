@@ -1,0 +1,74 @@
+[project]
+name = "smi-agent-seed"
+version = "0.1.0"
+description = "Domain-Agnostic AI Agent Seed — Multi-Agent Framework with Supervisor, Specialists, and Structured Responses"
+requires-python = ">=3.12"
+dependencies = [
+    # Orchestration
+    "temporalio>=1.7",
+    # Agent runtime
+    "langgraph>=0.3,<1.0",
+    "langgraph-checkpoint-postgres>=2.0",
+    # Graph DB
+    "neo4j>=5.0",
+    # LLM
+    "litellm>=1.40,<2.0",
+    "anthropic>=0.40",  # token counting + API
+    "tiktoken>=0.7",    # token pre-flight estimation for non-Anthropic models
+    # Observability
+    "langfuse>=2.0",
+    "structlog>=24.0",
+    # Pin OTel minor to avoid breaking API changes between 1.x sub-releases.
+    "opentelemetry-sdk>=1.25,<2.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.25,<2.0",
+    # Config & schemas
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+    # Database (checkpointer + migrations)
+    "asyncpg>=0.29",
+    "sqlalchemy[asyncio]>=2.0",
+    "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+conversation = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "redis[asyncio]>=5.0",
+    "stomp-py>=8.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+smi-agent-worker = "smi_agent.worker:main"
+smi-conversation-worker = "smi_agent.conversation.bootstrap:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smi_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--tb=short"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.lint.isort]
+known-first-party = ["smi_agent"]

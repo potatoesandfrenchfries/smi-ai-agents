@@ -23,21 +23,38 @@ logger = logging.getLogger(__name__)
 # Data shapes
 # ---------------------------------------------------------------------------
 
-AIRLINES = ["British Airways", "easyJet", "Ryanair", "Lufthansa", "KLM", "Air France"]
-AIRCRAFT = ["Boeing 737", "Airbus A320", "Airbus A321", "Boeing 787", "Embraer E190"]
+AIRLINES = [
+    # European / global
+    "British Airways", "easyJet", "Ryanair", "Lufthansa", "KLM", "Air France",
+    # Indian carriers
+    "IndiGo", "Air India", "SpiceJet", "Vistara", "Akasa Air", "GoFirst",
+]
+AIRLINES_INDIAN = ["IndiGo", "Air India", "SpiceJet", "Vistara", "Akasa Air", "GoFirst"]
+AIRCRAFT = [
+    "Boeing 737", "Airbus A320", "Airbus A321", "Boeing 787", "Embraer E190",
+    "Airbus A320neo", "Airbus A321neo",
+]
 
-# Prototype base prices per route segment (GBP) — seeded so same route = same data
-_BASE_PRICES = {"short": 60, "medium": 150, "long": 350}
+# Base prices per route segment (GBP)
+_BASE_PRICES = {"domestic_india": 30, "short": 60, "medium": 150, "long": 350}
+
+# Indian domestic airports
+_INDIAN = {"MAA", "BOM", "DEL", "HYD", "BLR", "LKO", "PAT", "CCU", "AMD", "PNQ", "COK", "GOI"}
+# European airports
+_EUROPEAN = {"EDI", "LHR", "LGW", "CDG", "AMS", "FRA", "MAD", "BCN", "FCO", "DUB"}
 
 
 def _route_length(origin: str, destination: str) -> str:
-    """Rough heuristic: classify route as short/medium/long for mock pricing."""
-    european = {"EDI", "LHR", "LGW", "CDG", "AMS", "FRA", "MAD", "BCN", "FCO", "DUB"}
+    """Classify route as domestic_india / short / medium / long for pricing."""
     o, d = origin.upper()[:3], destination.upper()[:3]
-    if o in european and d in european:
+    if o in _INDIAN and d in _INDIAN:
+        return "domestic_india"
+    if o in _EUROPEAN and d in _EUROPEAN:
         return "short"
-    if "JFK" in (o, d) or "LAX" in (o, d) or "DXB" in (o, d):
+    if any(x in (o, d) for x in ("JFK", "LAX", "SFO", "ORD", "YYZ")):
         return "long"
+    if o in _INDIAN or d in _INDIAN:
+        return "long"       # India ↔ international
     return "medium"
 
 
@@ -49,12 +66,16 @@ def _seeded_flights(origin: str, destination: str, date: str) -> list[dict[str, 
     length = _route_length(origin, destination)
     base_price = _BASE_PRICES[length]
 
+    # Use Indian carriers for domestic India routes
+    airline_pool = AIRLINES_INDIAN if length == "domestic_india" else AIRLINES
+
     results = []
-    # Generate 5 mock flights at different departure times
     for i, hour in enumerate([6, 9, 12, 15, 19]):
-        airline = rng.choice(AIRLINES)
+        airline = rng.choice(airline_pool)
         stops = rng.choices([0, 1, 2], weights=[60, 30, 10])[0]
-        duration_min = {"short": 90, "medium": 480, "long": 660}[length] + stops * 90 + rng.randint(-20, 30)
+        duration_min = {
+            "domestic_india": 90, "short": 90, "medium": 480, "long": 660,
+        }[length] + stops * 90 + rng.randint(-20, 30)
         price = round(base_price * rng.uniform(0.8, 2.2) * (1 + stops * 0.15), 2)
         dep_h, dep_m = hour, rng.choice([0, 15, 30, 45])
         arr_total = dep_h * 60 + dep_m + duration_min

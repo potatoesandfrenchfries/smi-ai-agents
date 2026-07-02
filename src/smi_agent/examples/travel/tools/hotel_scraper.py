@@ -19,13 +19,39 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 HOTEL_NAMES = [
+    # Generic / European
     "The Grand", "City Suites", "Harbour View", "Central Plaza",
     "The Riverside Inn", "Park Hotel", "Old Town Lodge", "Metro Boutique",
+    # Indian hotel brands & names
+    "Taj", "Oberoi", "ITC Grand", "The Leela", "Marriott",
+    "Hyatt Regency", "Lemon Tree", "Radisson Blu",
 ]
+
+# City-specific hotel overrides — richer names seeded per location
+_CITY_HOTELS: dict[str, list[str]] = {
+    "chennai":    ["Taj Coromandel", "ITC Grand Chola", "The Leela Palace", "Hyatt Regency Chennai", "Radisson Blu Chennai City Centre"],
+    "mumbai":     ["Taj Mahal Palace", "Oberoi Mumbai", "ITC Grand Central", "The Leela Mumbai", "Trident Nariman Point"],
+    "delhi":      ["The Imperial", "Taj Mahal Hotel Delhi", "Oberoi New Delhi", "ITC Maurya", "The Leela Palace Delhi"],
+    "hyderabad":  ["Taj Falaknuma Palace", "ITC Kohenur", "Marriott Hyderabad", "Hyatt Hyderabad Gachibowli", "Radisson Blu Plaza Hyderabad"],
+    "bengaluru":  ["Taj West End", "ITC Windsor", "The Leela Palace Bengaluru", "Oberoi Bengaluru", "Marriott Bengaluru Whitefield"],
+    "bangalore":  ["Taj West End", "ITC Windsor", "The Leela Palace Bengaluru", "Oberoi Bengaluru", "Marriott Bengaluru Whitefield"],
+    "lucknow":    ["Taj Hotel & Convention Centre", "Lebua Lucknow", "Radisson Lucknow City Centre", "Hyatt Regency Lucknow", "Lemon Tree Premier Lucknow"],
+    "patna":      ["Maurya Hotel Patna", "Hotel Chanakya Patna", "Radisson Blu Patna", "Hotel Patliputra Ashok", "Lemon Tree Patna"],
+}
+
 AMENITIES_POOL = [
     "Free WiFi", "Breakfast included", "Gym", "Pool", "Parking",
     "Bar", "Restaurant", "Spa", "Airport shuttle", "Pet-friendly",
+    # Indian hotel amenities
+    "Rooftop pool", "Ayurvedic spa", "24hr in-room dining",
+    "Concierge", "Business centre", "Valet parking", "Butler service",
 ]
+
+# Indian cities have lower nightly rates in GBP
+_INDIAN_CITIES = {
+    "chennai", "mumbai", "delhi", "hyderabad", "bengaluru",
+    "bangalore", "lucknow", "patna", "kolkata", "ahmedabad", "pune", "goa",
+}
 
 
 def _seeded_hotels(location: str, check_in: str, check_out: str) -> list[dict[str, Any]]:
@@ -34,12 +60,21 @@ def _seeded_hotels(location: str, check_in: str, check_out: str) -> list[dict[st
     rng = random.Random(seed)
 
     nights = _nights(check_in, check_out)
+    loc_lower = location.lower()
+    is_indian = loc_lower in _INDIAN_CITIES
+    city_hotels = _CITY_HOTELS.get(loc_lower, [])
+
     results = []
     for i in range(6):
-        name = rng.choice(HOTEL_NAMES) + (f" {rng.choice(['&', 'and'])} Spa" if i % 3 == 0 else "")
+        if city_hotels and i < len(city_hotels):
+            name = city_hotels[i]
+        else:
+            name = rng.choice(HOTEL_NAMES) + (f" {rng.choice(['&', 'and'])} Spa" if i % 3 == 0 else "")
         stars = rng.choice([3, 3, 4, 4, 4, 5])
-        rating = round(rng.uniform(6.5, 9.8), 1)
-        price_per_night = round(rng.uniform(60, 400) * (stars / 3), 2)
+        rating = round(rng.uniform(7.0, 9.8), 1)
+        # Indian hotels are cheaper in GBP due to exchange rate
+        price_range = (15, 120) if is_indian else (60, 400)
+        price_per_night = round(rng.uniform(*price_range) * (stars / 3), 2)
         distance_km = round(rng.uniform(0.2, 8.0), 1)
         amenities = rng.sample(AMENITIES_POOL, k=rng.randint(3, 6))
         results.append({

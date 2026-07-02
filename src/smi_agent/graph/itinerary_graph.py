@@ -130,9 +130,15 @@ async def parse_intent(state: ItineraryState) -> dict:
     # ── Airport / city extraction (3-letter IATA codes or common city names) ──
     iata = re.findall(r"\b([A-Z]{3})\b", goal)
     cities = {
+        # European / global
         "london": "LHR", "edinburgh": "EDI", "paris": "CDG",
         "amsterdam": "AMS", "berlin": "BER", "madrid": "MAD",
         "rome": "FCO", "new york": "JFK", "dubai": "DXB",
+        # Indian cities
+        "chennai": "MAA", "mumbai": "BOM", "delhi": "DEL",
+        "hyderabad": "HYD", "bengaluru": "BLR", "bangalore": "BLR",
+        "lucknow": "LKO", "patna": "PAT", "kolkata": "CCU",
+        "ahmedabad": "AMD", "pune": "PNQ", "goa": "GOI", "kochi": "COK",
     }
     origin = iata[0] if len(iata) > 0 else next(
         (v for k, v in cities.items() if k in goal_lower), None

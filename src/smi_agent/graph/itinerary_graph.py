@@ -106,12 +106,67 @@ def _candidates_to_reply(
 
 # ── Stage 1+2 · parse_intent ──────────────────────────────────────────────────
 
+_PARSE_SYSTEM = """You are a travel intent parser. Extract structured fields from the user's travel request.
+
+Return ONLY valid JSON with these fields (use null if not mentioned):
+{
+  "origin_iata": "3-letter IATA code or city name",
+  "destination_iata": "3-letter IATA code or city name",
+  "check_in": "YYYY-MM-DD",
+  "check_out": "YYYY-MM-DD",
+  "budget_gbp": number or null,
+  "purpose": "leisure" | "business" | "corporate",
+  "traveler_count": number,
+  "sort_preference": "cost" | "comfort" | "time"
+}
+
+Rules:
+- Resolve city names to IATA codes where known (Chennai=MAA, Mumbai=BOM, Delhi=DEL,
+  Hyderabad=HYD, Bengaluru=BLR, Lucknow=LKO, Patna=PAT, Kolkata=CCU,
+  London=LHR, Edinburgh=EDI, Paris=CDG, Amsterdam=AMS, Dubai=DXB, New York=JFK)
+- Infer check_out from duration cues: "4 days from 9th Sept" → check_in=2026-09-09, check_out=2026-09-13
+- "comfortable" / "direct" / "business class" → sort_preference="comfort"
+- "cheapest" / "budget" → sort_preference="cost"
+- "fastest" / "quickest" → sort_preference="time"
+- Convert budget to GBP number (e.g. "600 pounds" → 600, "£500" → 500)
+- Today is """ + datetime.utcnow().strftime("%Y-%m-%d") + """
+- Return ONLY the JSON object, no explanation."""
+
+
+async def _llm_parse(goal: str) -> dict | None:
+    """Call Gemini Flash Lite (triage lane) to extract structured fields."""
+    try:
+        from smi_agent.llm.router import LLMRouter
+        router = LLMRouter(
+            lane="triage",
+            model_overrides={"triage": "gemini/gemini-2.0-flash"},
+            temperature=0.0,
+        )
+        result = await router.call(
+            messages=[
+                {"role": "system", "content": _PARSE_SYSTEM},
+                {"role": "user", "content": goal},
+            ],
+            trace_name="parse_intent",
+        )
+        import json
+        text = result.content.strip()
+        # Strip markdown code fences if the model wraps output
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text.strip())
+        return json.loads(text)
+    except Exception as exc:
+        logger.warning("[parse_intent] LLM extraction failed (%s) — falling back to regex", exc)
+        return None
+
+
 async def parse_intent(state: ItineraryState) -> dict:
     """Extract typed TripConstraints from the raw natural-language goal.
 
-    In production this calls the LLMRouter (reasoning lane) to extract structured
-    fields. For the prototype, deterministic keyword extraction is used so the
-    graph runs without API keys.
+    Primary path: Gemini Flash Lite (triage lane) extracts all fields including
+    natural date expressions ("9th September", "4 days from Monday") and synonyms.
+    Fallback: regex keyword extraction when the LLM call fails.
 
     Implements: FR-INT-1 (accept NL goal), FR-INT-2 (parse into Trip + Constraints),
                 FR-INT-3 (identify missing fields).
@@ -122,66 +177,56 @@ async def parse_intent(state: ItineraryState) -> dict:
     goal = state["raw_goal"]
     goal_lower = goal.lower()
 
-    # ── Date extraction ───────────────────────────────────────────────────────
-    dates = re.findall(r"\d{4}-\d{2}-\d{2}", goal)
-    check_in = dates[0] if len(dates) > 0 else None
-    check_out = dates[1] if len(dates) > 1 else None
+    # ── Primary: LLM extraction ───────────────────────────────────────────────
+    parsed = await _llm_parse(goal)
 
-    # ── Airport / city extraction ─────────────────────────────────────────────
-    iata = re.findall(r"\b([A-Z]{3})\b", goal)
-    cities = {
-        # European / global
-        "london": "LHR", "edinburgh": "EDI", "paris": "CDG",
-        "amsterdam": "AMS", "berlin": "BER", "madrid": "MAD",
-        "rome": "FCO", "new york": "JFK", "dubai": "DXB",
-        # Indian cities
-        "chennai": "MAA", "mumbai": "BOM", "delhi": "DEL",
-        "hyderabad": "HYD", "bengaluru": "BLR", "bangalore": "BLR",
-        "lucknow": "LKO", "patna": "PAT", "kolkata": "CCU",
-        "ahmedabad": "AMD", "pune": "PNQ", "goa": "GOI", "kochi": "COK",
-    }
+    if parsed:
+        origin      = parsed.get("origin_iata") or None
+        destination = parsed.get("destination_iata") or None
+        check_in    = parsed.get("check_in") or None
+        check_out   = parsed.get("check_out") or None
+        budget_gbp  = parsed.get("budget_gbp") or None
+        purpose     = parsed.get("purpose") or "leisure"
+        sort_pref   = parsed.get("sort_preference") or "cost"
+        traveler_count = int(parsed.get("traveler_count") or 1)
 
-    # Respect "from X to Y" / "X to Y" direction in the sentence
-    # Find positions of each city name and sort by appearance order
-    def _find_cities_in_order(text: str) -> list[str]:
-        found = []
-        for name, code in cities.items():
-            idx = text.find(name)
-            if idx != -1:
-                found.append((idx, code))
-        found.sort(key=lambda x: x[0])
-        return [code for _, code in found]
-
-    ordered = _find_cities_in_order(goal_lower)
-
-    if len(iata) >= 2:
-        origin, destination = iata[0], iata[1]
-    elif len(iata) == 1 and len(ordered) >= 1:
-        origin, destination = iata[0], ordered[0]
-    elif len(ordered) >= 2:
-        # Use sentence order — first city mentioned = origin
-        origin, destination = ordered[0], ordered[1]
-    elif len(ordered) == 1:
-        origin, destination = ordered[0], None
     else:
-        origin, destination = None, None
+        # ── Fallback: regex keyword extraction ────────────────────────────────
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", goal)
+        check_in  = dates[0] if len(dates) > 0 else None
+        check_out = dates[1] if len(dates) > 1 else None
 
-    # ── Budget extraction ─────────────────────────────────────────────────────
-    budget_match = re.search(r"£(\d[\d,]*)", goal) or re.search(r"\b(\d{3,})\s*(?:gbp|pounds?)\b", goal_lower)
-    budget_gbp = float(budget_match.group(1).replace(",", "")) if budget_match else None
+        iata = re.findall(r"\b([A-Z]{3})\b", goal)
+        cities = {
+            "london": "LHR", "edinburgh": "EDI", "paris": "CDG",
+            "amsterdam": "AMS", "berlin": "BER", "madrid": "MAD",
+            "rome": "FCO", "new york": "JFK", "dubai": "DXB",
+            "chennai": "MAA", "mumbai": "BOM", "delhi": "DEL",
+            "hyderabad": "HYD", "bengaluru": "BLR", "bangalore": "BLR",
+            "lucknow": "LKO", "patna": "PAT", "kolkata": "CCU",
+            "ahmedabad": "AMD", "pune": "PNQ", "goa": "GOI", "kochi": "COK",
+        }
 
-    # ── Purpose and preferences ───────────────────────────────────────────────
-    purpose = (
-        "business" if "business" in goal_lower
-        else "corporate" if "corporate" in goal_lower
-        else "leisure"
-    )
-    sort_pref = (
-        "comfort" if any(w in goal_lower for w in ["comfort", "direct", "business class"])
-        else "time" if any(w in goal_lower for w in ["fastest", "quickest", "shortest"])
-        else "cost"
-    )
-    traveler_count = int(m.group(1)) if (m := re.search(r"\b(\d+)\s+(?:people|travelers?|passengers?)\b", goal_lower)) else 1
+        def _cities_in_order(text: str) -> list[str]:
+            found = [(text.find(k), v) for k, v in cities.items() if k in text]
+            return [v for _, v in sorted(found)]
+
+        ordered = _cities_in_order(goal_lower)
+        if len(iata) >= 2:
+            origin, destination = iata[0], iata[1]
+        elif len(ordered) >= 2:
+            origin, destination = ordered[0], ordered[1]
+        elif len(ordered) == 1:
+            origin, destination = ordered[0], None
+        else:
+            origin, destination = None, None
+
+        bm = re.search(r"£(\d[\d,]*)", goal) or re.search(r"\b(\d{3,})\s*(?:gbp|pounds?)\b", goal_lower)
+        budget_gbp = float(bm.group(1).replace(",", "")) if bm else None
+        purpose = "business" if "business" in goal_lower else "corporate" if "corporate" in goal_lower else "leisure"
+        sort_pref = "comfort" if any(w in goal_lower for w in ["comfort", "direct", "business class"]) \
+            else "time" if any(w in goal_lower for w in ["fastest", "quickest", "shortest"]) else "cost"
+        traveler_count = int(m.group(1)) if (m := re.search(r"\b(\d+)\s+(?:people|travelers?|passengers?)\b", goal_lower)) else 1
 
     constraints = TripConstraints(
         origin=origin,

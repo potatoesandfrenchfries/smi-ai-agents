@@ -9,10 +9,12 @@ output_schema_variant: full_v1
 runtime_profile: workflow
 
 llm:
-  lane: triage                           # Haiku — simpler task, fast and cheap
+  lane: triage
   temperature: 0.2
   max_tokens_per_call: 2000
   prompt_templates_dir: "prompts/agents/restaurant"
+  model_overrides:
+    triage: "gemini/gemini-2.0-flash-lite" # Gemini Flash Lite — fast and cheap
 
 graph:
   allowed_cypher_templates: []

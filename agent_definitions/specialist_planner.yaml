@@ -10,10 +10,12 @@ output_schema_variant: full_v1
 runtime_profile: coordinator
 
 llm:
-  lane: reasoning                        # Claude Opus — strongest for multi-step planning
+  lane: reasoning
   temperature: 0.3
   max_tokens_per_call: 8000
   prompt_templates_dir: "prompts/agents/planner"
+  model_overrides:
+    reasoning: "gemini/gemini-2.0-flash-thinking-exp"  # Gemini — complex planning
 
 graph:
   max_depth: 3

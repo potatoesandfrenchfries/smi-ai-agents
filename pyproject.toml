@@ -15,6 +15,7 @@ dependencies = [
     "litellm>=1.40,<2.0",
     "anthropic>=0.40",  # token counting + API
     "tiktoken>=0.7",    # token pre-flight estimation for non-Anthropic models
+    "google-generativeai>=0.8",  # Gemini support for LiteLLM
     # Observability
     "langfuse>=2.0",
     "structlog>=24.0",

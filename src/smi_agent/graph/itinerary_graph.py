@@ -127,7 +127,7 @@ async def parse_intent(state: ItineraryState) -> dict:
     check_in = dates[0] if len(dates) > 0 else None
     check_out = dates[1] if len(dates) > 1 else None
 
-    # ── Airport / city extraction (3-letter IATA codes or common city names) ──
+    # ── Airport / city extraction ─────────────────────────────────────────────
     iata = re.findall(r"\b([A-Z]{3})\b", goal)
     cities = {
         # European / global
@@ -140,12 +140,31 @@ async def parse_intent(state: ItineraryState) -> dict:
         "lucknow": "LKO", "patna": "PAT", "kolkata": "CCU",
         "ahmedabad": "AMD", "pune": "PNQ", "goa": "GOI", "kochi": "COK",
     }
-    origin = iata[0] if len(iata) > 0 else next(
-        (v for k, v in cities.items() if k in goal_lower), None
-    )
-    destination = iata[1] if len(iata) > 1 else next(
-        (v for k, v in cities.items() if k in goal_lower and v != origin), None
-    )
+
+    # Respect "from X to Y" / "X to Y" direction in the sentence
+    # Find positions of each city name and sort by appearance order
+    def _find_cities_in_order(text: str) -> list[str]:
+        found = []
+        for name, code in cities.items():
+            idx = text.find(name)
+            if idx != -1:
+                found.append((idx, code))
+        found.sort(key=lambda x: x[0])
+        return [code for _, code in found]
+
+    ordered = _find_cities_in_order(goal_lower)
+
+    if len(iata) >= 2:
+        origin, destination = iata[0], iata[1]
+    elif len(iata) == 1 and len(ordered) >= 1:
+        origin, destination = iata[0], ordered[0]
+    elif len(ordered) >= 2:
+        # Use sentence order — first city mentioned = origin
+        origin, destination = ordered[0], ordered[1]
+    elif len(ordered) == 1:
+        origin, destination = ordered[0], None
+    else:
+        origin, destination = None, None
 
     # ── Budget extraction ─────────────────────────────────────────────────────
     budget_match = re.search(r"£(\d[\d,]*)", goal) or re.search(r"\b(\d{3,})\s*(?:gbp|pounds?)\b", goal_lower)

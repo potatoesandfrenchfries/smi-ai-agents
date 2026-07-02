@@ -44,9 +44,28 @@ _INDIAN = {"MAA", "BOM", "DEL", "HYD", "BLR", "LKO", "PAT", "CCU", "AMD", "PNQ",
 _EUROPEAN = {"EDI", "LHR", "LGW", "CDG", "AMS", "FRA", "MAD", "BCN", "FCO", "DUB"}
 
 
+_CITY_TO_IATA = {
+    "chennai": "MAA", "mumbai": "BOM", "delhi": "DEL",
+    "hyderabad": "HYD", "bengaluru": "BLR", "bangalore": "BLR",
+    "lucknow": "LKO", "patna": "PAT", "kolkata": "CCU",
+    "ahmedabad": "AMD", "pune": "PNQ", "goa": "GOI", "kochi": "COK",
+    "london": "LHR", "edinburgh": "EDI", "paris": "CDG",
+    "amsterdam": "AMS", "berlin": "BER", "madrid": "MAD",
+    "rome": "FCO", "new york": "JFK", "dubai": "DXB",
+}
+
+
+def _to_iata(city_or_code: str) -> str:
+    """Resolve a city name or raw input to a 3-letter IATA code."""
+    lower = city_or_code.lower().strip()
+    if lower in _CITY_TO_IATA:
+        return _CITY_TO_IATA[lower]
+    return city_or_code.upper()[:3]
+
+
 def _route_length(origin: str, destination: str) -> str:
     """Classify route as domestic_india / short / medium / long for pricing."""
-    o, d = origin.upper()[:3], destination.upper()[:3]
+    o, d = _to_iata(origin), _to_iata(destination)
     if o in _INDIAN and d in _INDIAN:
         return "domestic_india"
     if o in _EUROPEAN and d in _EUROPEAN:

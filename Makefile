@@ -28,6 +28,7 @@ help:
 	@echo "    make run-all          Start Temporal server + worker + API together"
 	@echo "    make demo             Submit a demo itinerary workflow and print result"
 	@echo "    make cli              Interactive terminal — type your own trip request"
+	@echo "    make nlcli            Natural language terminal — describe your trip in plain English"
 	@echo ""
 	@echo "  Dev"
 	@echo "    make check            Verify imports and YAML definitions load correctly"
@@ -85,6 +86,10 @@ run-all:
 .PHONY: cli
 cli:
 	$(PYTHON) scripts/cli.py
+
+.PHONY: nlcli
+nlcli:
+	$(PYTHON) scripts/nlcli.py
 
 .PHONY: demo
 demo:

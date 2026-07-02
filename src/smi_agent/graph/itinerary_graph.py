@@ -138,8 +138,7 @@ async def _llm_parse(goal: str) -> dict | None:
     try:
         from smi_agent.llm.router import LLMRouter
         router = LLMRouter(
-            lane="triage",
-            model_overrides={"triage": "gemini/gemini-2.0-flash"},
+            lane="triage",   # → claude-haiku-4-5-20251001 (fast, cheap, perfect for extraction)
             temperature=0.0,
         )
         result = await router.call(

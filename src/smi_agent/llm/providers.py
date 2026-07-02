@@ -31,7 +31,7 @@ ProviderName = Literal["anthropic", "openai", "mistral", "ollama", "vllm"]
 
 PROVIDER_MODELS: dict[str, dict[str, str | None]] = {
     "anthropic": {
-        "reasoning": "anthropic/claude-opus-4-6",
+        "reasoning": "anthropic/claude-opus-4-8",
         "middle": "anthropic/claude-sonnet-4-6",
         "triage": "anthropic/claude-haiku-4-5-20251001",
         "air_gap": None,  # Anthropic has no air-gap / on-prem offering

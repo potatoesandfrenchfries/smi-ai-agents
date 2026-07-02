@@ -105,6 +105,22 @@ async def main() -> None:
 
     # ── Print result ──────────────────────────────────────────────────────────
     print("=== ITINERARY ===")
+
+    # ── Policy breach — explain clearly and stop ──────────────────────────────
+    if result.policy_status == "breach":
+        budget = constraints.get("budget_gbp")
+        print(f"Status      : needs approval")
+        print(f"Total cost  : £{result.total_cost_gbp:.2f}")
+        if budget:
+            print(f"Budget      : £{budget:.2f}")
+            print(f"Overspend   : £{result.total_cost_gbp - budget:.2f}")
+        print()
+        print("The estimated cost exceeds your budget. Options:")
+        print("  1. Re-run with a higher budget")
+        print("  2. Re-run with sort_preference=cost to find cheaper options")
+        print("  3. Shorten your stay")
+        return
+
     print(f"Status      : {result.status}")
     print(f"Policy      : {result.policy_status}")
     if result.total_cost_gbp:

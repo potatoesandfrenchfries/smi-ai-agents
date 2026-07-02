@@ -198,13 +198,22 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
     })
 
     itin = result.get("itinerary") or {}
+    policy = result.get("policy_status", "pending")
+
+    # When policy is breach the graph exits before compile_itinerary runs,
+    # so itin is empty. Use "needs_approval" instead of the misleading "error".
+    if policy == "breach" and not itin:
+        status = "needs_approval"
+    else:
+        status = itin.get("status", "error")
+
     return ItineraryResult(
         plan_id=params.plan_id,
-        status=itin.get("status", "error"),
+        status=status,
         segments=itin.get("segments", []),
         dining_options=itin.get("dining_options", []),
         total_cost_gbp=result.get("total_cost_gbp"),
-        policy_status=result.get("policy_status", "pending"),
+        policy_status=policy,
         assumptions=itin.get("assumptions", []),
         errors=result.get("errors") or [],
     )

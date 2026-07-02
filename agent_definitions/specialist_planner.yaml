@@ -10,12 +10,10 @@ output_schema_variant: full_v1
 runtime_profile: coordinator
 
 llm:
-  lane: reasoning
+  lane: triage                           # → claude-haiku-4-5-20251001
   temperature: 0.3
   max_tokens_per_call: 8000
   prompt_templates_dir: "prompts/agents/planner"
-  model_overrides:
-    reasoning: "gemini/gemini-2.0-flash-thinking-exp"  # Gemini — complex planning
 
 graph:
   max_depth: 3

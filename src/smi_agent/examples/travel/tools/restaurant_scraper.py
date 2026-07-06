@@ -120,6 +120,26 @@ _CITY_RESTAURANTS: dict[str, list[dict]] = {
 }
 
 
+# Spend-per-person GBP ranges backing each price_band symbol. Kept at module
+# level so both the mock generator and the live-data normaliser (which only
+# gets a qualitative price_range tag back from Overpass, never a number) can
+# convert a symbol into an actual figure the Budget Agent can do maths on.
+_SPEND_RANGES_GBP = {"£": (10, 20), "££": (20, 40), "£££": (40, 80), "££££": (80, 150)}
+_SPEND_RANGES_GBP_INDIA = {"£": (3, 8), "££": (8, 20), "£££": (20, 50), "££££": (50, 120)}
+
+
+def _price_band_to_avg_spend_gbp(price_band: str, indian: bool = False) -> float:
+    """Midpoint GBP estimate for a price-band symbol.
+
+    Used when a data source supplies only the qualitative symbol (e.g. OSM's
+    price_range tag) and no actual spend figure, so cost calculations always
+    have a real number to work with instead of a "£"-style stand-in.
+    """
+    ranges = _SPEND_RANGES_GBP_INDIA if indian else _SPEND_RANGES_GBP
+    lo, hi = ranges.get(price_band, ranges["££"])
+    return round((lo + hi) / 2, 2)
+
+
 def _seeded_restaurants(location: str, cuisine: str | None) -> list[dict[str, Any]]:
     """Generate deterministic mock restaurant results, using city-specific data where available."""
     seed = int(hashlib.md5(f"{location}{cuisine or ''}".encode()).hexdigest(), 16)
@@ -129,12 +149,7 @@ def _seeded_restaurants(location: str, cuisine: str | None) -> list[dict[str, An
 
     # Indian cities have lower average spend in GBP
     indian_city = location.lower() in _CITY_RESTAURANTS
-    spend_ranges = {
-        "£":    (3, 8)   if indian_city else (10, 20),
-        "££":   (8, 20)  if indian_city else (20, 40),
-        "£££":  (20, 50) if indian_city else (40, 80),
-        "££££": (50, 120) if indian_city else (80, 150),
-    }
+    spend_ranges = _SPEND_RANGES_GBP_INDIA if indian_city else _SPEND_RANGES_GBP
 
     results = []
     for i in range(8):
@@ -229,10 +244,20 @@ async def _fetch_restaurants(location: str, cuisine: str | None) -> list[dict[st
 
 
 def _normalise_overpass(elements: list[dict], location: str) -> list[dict[str, Any]]:
-    """Map Overpass/OSM fields to our internal restaurant schema."""
+    """Map Overpass/OSM fields to our internal restaurant schema.
+
+    OSM only ever gives us a qualitative price_range tag ("£".."££££"), never
+    an actual spend figure, so avg_spend_per_person_gbp is derived from that
+    symbol rather than left as None — every restaurant needs a real number
+    for the Budget Agent's cost maths, not just a "how expensive" indicator.
+    """
+    indian = location.lower() in _CITY_RESTAURANTS
     results = []
     for i, el in enumerate(elements):
         tags = el.get("tags", {})
+        price_band = tags.get("price_range", "££")
+        if price_band not in _SPEND_RANGES_GBP:
+            price_band = "££"
         results.append({
             "id": f"OSM-{el.get('id', i)}",
             "name": tags.get("name", "Unnamed Restaurant"),
@@ -240,8 +265,8 @@ def _normalise_overpass(elements: list[dict], location: str) -> list[dict[str, A
             "location": location,
             "rating": None,         # OSM does not carry ratings
             "review_count": None,
-            "price_band": tags.get("price_range", "££"),
-            "avg_spend_per_person_gbp": None,
+            "price_band": price_band,
+            "avg_spend_per_person_gbp": _price_band_to_avg_spend_gbp(price_band, indian=indian),
             "distance_from_location_km": None,
             "highlight": tags.get("description", ""),
             "booking_required": False,

@@ -21,8 +21,8 @@ Implements the 6-stage end-to-end plan flow defined in the PRD (Section 5):
     ▼
   policy_check          Stage 4 · Budget + policy compliance gate (FR-SPC-2, FR-ORC-5)
     │
-    ├─ [breach] ───────► END     Needs human approval before proceeding (FR-PRS-4)
-    │
+    ├─ [breach] ───────► budget_agent   Suggests cheaper alternative combos, then END
+    │                                   (FR-PRS-4 — human approval still required)
     ▼
   compile_itinerary     Stage 6 · Versioned itinerary with per-segment handoff links (FR-PRS-1/3)
     │
@@ -584,6 +584,112 @@ async def policy_check(state: ItineraryState) -> dict:
     }
 
 
+# ── Stage 5 · budget_agent ────────────────────────────────────────────────────
+
+def _combo_cost(
+    flight: dict, hotel: dict, restaurants: list[dict], attractions: list[dict],
+) -> float:
+    return round(
+        (flight.get("price_gbp") or 0)
+        + (hotel.get("total_price_gbp") or 0)
+        + sum(r.get("avg_spend_per_person_gbp") or 0 for r in restaurants)
+        + sum(a.get("entry_fee_gbp") or 0 for a in attractions),
+        2,
+    )
+
+
+async def budget_agent(state: ItineraryState) -> dict:
+    """Suggest cheaper alternative combinations when the plan breaches budget.
+
+    Re-ranks the specialist candidates already gathered in this plan — no new
+    searches are issued, the numbers needed to answer "what's cheaper" are
+    already in state (FR-ORC-3: no full re-fetch just to compare cost). Each
+    alternative swaps out one or more segments for its cheapest available
+    option and reports the resulting total and savings, so the traveler picks
+    a concrete trade-off instead of a generic "over budget" message.
+    """
+    emitter = _emitter(state)
+    await emitter.emit("budget_agent", "in_progress", "Looking for cheaper alternatives...")
+
+    budget = (state.get("constraints") or {}).get("budget_gbp")
+    trip_type = state.get("trip_type", "leisure")
+    current_total = state.get("total_cost_gbp") or 0.0
+
+    flights = (state.get("flight_reply") or {}).get("candidates", [])
+    hotels = (state.get("hotel_reply") or {}).get("candidates", [])
+    restaurants = (state.get("restaurant_reply") or {}).get("candidates", [])
+    attractions = (state.get("attraction_reply") or {}).get("candidates", [])
+
+    current_flight = flights[0] if flights else {}
+    current_hotel = hotels[0] if hotels else {}
+    current_restaurants = restaurants[:3]
+    current_attractions = attractions[:3] if trip_type == "leisure" else []
+
+    cheapest_flight = min(flights, key=lambda f: f.get("price_gbp") or float("inf"), default={})
+    cheapest_hotel = min(hotels, key=lambda h: h.get("total_price_gbp") or float("inf"), default={})
+    cheapest_restaurants = sorted(
+        restaurants, key=lambda r: r.get("avg_spend_per_person_gbp") or float("inf")
+    )[:3]
+
+    candidates: list[dict] = []
+
+    if cheapest_hotel and cheapest_hotel.get("id") != current_hotel.get("id"):
+        total = _combo_cost(current_flight, cheapest_hotel, current_restaurants, current_attractions)
+        candidates.append({
+            "label": f"Switch hotel to {cheapest_hotel.get('name', 'a cheaper option')}",
+            "total_cost_gbp": total,
+        })
+
+    if cheapest_flight and cheapest_flight.get("id") != current_flight.get("id"):
+        total = _combo_cost(cheapest_flight, current_hotel, current_restaurants, current_attractions)
+        candidates.append({
+            "label": f"Switch flight to {cheapest_flight.get('airline', 'a cheaper option')} "
+                     f"({cheapest_flight.get('departure', 'alternate time')})",
+            "total_cost_gbp": total,
+        })
+
+    combo_label = "Switch to the cheapest flight, hotel, and dining combo"
+    if trip_type == "leisure" and attractions:
+        combo_label += " and skip the optional attractions"
+    candidates.append({
+        "label": combo_label,
+        "total_cost_gbp": _combo_cost(cheapest_flight, cheapest_hotel, cheapest_restaurants, []),
+    })
+
+    # De-dupe identical totals (e.g. only one hotel/flight tier available) and
+    # only surface combos that actually save money, cheapest first, capped at 3.
+    seen_totals: set[float] = set()
+    alternatives: list[dict] = []
+    for c in sorted(candidates, key=lambda c: c["total_cost_gbp"]):
+        savings = round(current_total - c["total_cost_gbp"], 2)
+        if savings <= 0 or c["total_cost_gbp"] in seen_totals:
+            continue
+        seen_totals.add(c["total_cost_gbp"])
+        alternatives.append({
+            "label": c["label"],
+            "total_cost_gbp": c["total_cost_gbp"],
+            "savings_gbp": savings,
+            "within_budget": bool(budget) and c["total_cost_gbp"] <= budget,
+        })
+        if len(alternatives) == 3:
+            break
+
+    await emitter.emit(
+        "budget_agent", "completed",
+        f"Found {len(alternatives)} cheaper alternative(s)" if alternatives
+        else "No cheaper alternatives found among current candidates — consider raising the budget"
+    )
+
+    plan_graph = dict(state.get("plan_graph") or {})
+    plan_graph["stages"] = plan_graph.get("stages", []) + ["budget_agent"]
+
+    return {
+        "budget_alternatives": alternatives,
+        "plan_graph": plan_graph,
+        "current_node": "budget_agent",
+    }
+
+
 # ── Stage 6 · compile_itinerary ───────────────────────────────────────────────
 
 async def compile_itinerary(state: ItineraryState) -> dict:
@@ -749,10 +855,10 @@ def _route_after_parse(
 
 def _route_after_policy(
     state: ItineraryState,
-) -> Literal["compile_itinerary", "__end__"]:
-    """Route to compile if compliant; END if budget breach requires approval."""
+) -> Literal["compile_itinerary", "budget_agent"]:
+    """Route to compile if compliant; to the Budget Agent if breach requires approval."""
     if state.get("policy_status") == "breach":
-        return "__end__"
+        return "budget_agent"
     return "compile_itinerary"
 
 
@@ -783,6 +889,7 @@ def build_itinerary_graph(checkpointer: Any = None) -> CompiledStateGraph[Itiner
     graph.add_node("search_leisure_specialists", search_leisure_specialists)
     graph.add_node("merge_results", merge_results)
     graph.add_node("policy_check", policy_check)
+    graph.add_node("budget_agent", budget_agent)
     graph.add_node("compile_itinerary", compile_itinerary)
     graph.add_node("await_confirmation", await_confirmation)
 
@@ -804,10 +911,11 @@ def build_itinerary_graph(checkpointer: Any = None) -> CompiledStateGraph[Itiner
     graph.add_conditional_edges(
         "policy_check",
         _route_after_policy,
-        {"compile_itinerary": "compile_itinerary", "__end__": END},
+        {"compile_itinerary": "compile_itinerary", "budget_agent": "budget_agent"},
     )
     graph.add_edge("compile_itinerary", "await_confirmation")
     graph.add_edge("await_confirmation", END)
+    graph.add_edge("budget_agent", END)
 
     compile_kwargs: dict[str, Any] = {}
     if checkpointer is not None:

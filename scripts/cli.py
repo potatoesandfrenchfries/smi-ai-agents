@@ -96,10 +96,17 @@ async def main() -> None:
         print(f"Status      : needs approval")
         print(f"Total cost  : £{result.total_cost_gbp:.2f}")
         print()
-        print("The estimated cost exceeds your budget. Options:")
-        print("  1. Re-run with a higher budget")
-        print("  2. Choose 'cost' as your sort preference")
-        print("  3. Shorten your stay")
+        if result.budget_alternatives:
+            print("The estimated cost exceeds your budget. Cheaper alternatives:")
+            for i, alt in enumerate(result.budget_alternatives, start=1):
+                fit = "within budget" if alt.get("within_budget") else "still over budget"
+                print(
+                    f"  {i}. {alt['label']} — £{alt['total_cost_gbp']:.2f} "
+                    f"(saves £{alt['savings_gbp']:.2f}, {fit})"
+                )
+        else:
+            print("The estimated cost exceeds your budget, and no cheaper combination")
+            print("was found among the current candidates — try a higher budget instead.")
         return
 
     print(f"Status      : {result.status}")

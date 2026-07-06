@@ -76,6 +76,7 @@ class ItineraryState(TypedDict):
     # ── Stage 5 · Merge + policy ──────────────────────────────────────────────
     policy_status: NotRequired[Literal["compliant", "breach", "pending"]]
     total_cost_gbp: NotRequired[float | None]
+    budget_alternatives: NotRequired[list[dict]]  # Budget Agent output — populated only on breach
 
     # ── Stage 6 · Present + handoff ───────────────────────────────────────────
     itinerary: NotRequired[dict | None]       # Versioned itinerary with segments (FR-PRS-1)

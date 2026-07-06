@@ -75,6 +75,7 @@ class ItineraryResult:
     policy_status: str = "pending"
     assumptions: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
 
 
 # ── Activities ────────────────────────────────────────────────────────────────
@@ -216,4 +217,5 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         policy_status=policy,
         assumptions=itin.get("assumptions", []),
         errors=result.get("errors") or [],
+        budget_alternatives=result.get("budget_alternatives") or [],
     )

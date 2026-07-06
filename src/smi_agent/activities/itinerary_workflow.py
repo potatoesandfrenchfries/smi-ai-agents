@@ -74,6 +74,7 @@ class ItineraryWorkflowResult:
     policy_status: str = "pending"
     assumptions: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
 
 
 # ── Workflow ──────────────────────────────────────────────────────────────────
@@ -188,6 +189,7 @@ class ItineraryWorkflow:
             policy_status=itinerary.policy_status,
             assumptions=itinerary.assumptions,
             errors=itinerary.errors,
+            budget_alternatives=itinerary.budget_alternatives,
         )
 
 

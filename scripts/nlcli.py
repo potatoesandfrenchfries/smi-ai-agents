@@ -47,6 +47,7 @@ async def main() -> None:
     missing = parsed.get("needs_input", [])
 
     # ── Show what was understood ──────────────────────────────────────────────
+    purpose = constraints.get("purpose", "leisure")
     print()
     print("Understood:")
     print(f"  From        : {constraints.get('origin') or '—'}")
@@ -54,7 +55,8 @@ async def main() -> None:
     print(f"  Departure   : {constraints.get('check_in') or '—'}")
     print(f"  Return      : {constraints.get('check_out') or '—'}")
     print(f"  Budget      : {'£' + str(constraints.get('budget_gbp')) if constraints.get('budget_gbp') else '—'}")
-    print(f"  Sort by     : {constraints.get('sort_preference', 'cost')}")
+    print(f"  Trip type   : {purpose.title()}")
+    print(f"  Sort by     : {constraints.get('sort_preference', 'cost')}  (derived from trip type, not parsed directly)")
 
     # ── Prompt for any missing required fields ────────────────────────────────
     if missing:
@@ -72,6 +74,14 @@ async def main() -> None:
         for field in missing:
             value = input(f"  {field_prompts.get(field, field)}: ").strip()
             constraints[field] = value
+
+    # ── Optional addon: override the derived sort preference ─────────────────
+    override = input(
+        f"\nOverride sort preference (currently '{constraints.get('sort_preference', 'cost')}')? "
+        f"[cost/comfort/time, Enter to keep]: "
+    ).strip().lower()
+    if override in ("cost", "comfort", "time"):
+        constraints["sort_preference"] = override
 
     # ── Final confirmation ────────────────────────────────────────────────────
     print()

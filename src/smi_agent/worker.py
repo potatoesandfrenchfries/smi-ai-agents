@@ -34,6 +34,7 @@ from temporalio.worker import Worker
 
 from smi_agent.activities.itinerary_workflow import ItineraryWorkflow
 from smi_agent.activities.travel_activities import (
+    attraction_search_activity,
     flight_search_activity,
     hotel_search_activity,
     itinerary_generation_activity,
@@ -58,6 +59,7 @@ async def _run_worker() -> None:
             flight_search_activity,
             hotel_search_activity,
             restaurant_search_activity,
+            attraction_search_activity,
             itinerary_generation_activity,
         ],
     )

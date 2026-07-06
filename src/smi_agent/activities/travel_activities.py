@@ -50,6 +50,13 @@ class RestaurantSearchParams:
 
 
 @dataclass
+class AttractionSearchParams:
+    location: str
+    sort_by: str = "rating"
+    num_results: int = 5
+
+
+@dataclass
 class ItineraryParams:
     plan_id: str
     tenant_id: str
@@ -63,6 +70,7 @@ class ItineraryParams:
     flights: list[dict] = field(default_factory=list)
     hotels: list[dict] = field(default_factory=list)
     restaurants: list[dict] = field(default_factory=list)
+    attractions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -135,11 +143,34 @@ async def restaurant_search_activity(params: RestaurantSearchParams) -> list[dic
 
 
 @activity.defn
+async def attraction_search_activity(params: AttractionSearchParams) -> list[dict]:
+    """Search for tourist attractions and experiences. Retried by Temporal on failure.
+
+    Always dispatched alongside the other three searches (cheap mock data, no
+    real cost) — whether it ends up shown to the traveler depends on the
+    business/leisure classification the graph makes downstream.
+    """
+    from smi_agent.examples.travel.tools.attraction_scraper import search_attractions
+
+    activity.logger.info("Searching attractions in %s", params.location)
+    results = await search_attractions(
+        location=params.location,
+        sort_by=params.sort_by,
+        num_results=params.num_results,
+    )
+    activity.logger.info("Attraction search returned %d results", len(results))
+    return results
+
+
+@activity.defn
 async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryResult:
     """Compile the final itinerary from all search results via the LangGraph workflow.
 
     Runs the LangGraph itinerary graph with pre-fetched search results injected
-    into state, skipping the search nodes and jumping straight to merge → compile.
+    into state. search_business_specialists/search_leisure_specialists reuse
+    any reply already present in state instead of re-fetching it, so this data
+    isn't silently discarded (FR-ORC-3 — no redundant re-fetch of what's
+    already known).
     """
     import uuid
     from smi_agent.graph.itinerary_graph import build_itinerary_graph
@@ -175,6 +206,14 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         confidence=0.9 if params.restaurants else 0.4,
         provenance=[r.get("id", str(uuid.uuid4())) for r in params.restaurants],
     )
+    attraction_reply = TaskReply(
+        status="done" if params.attractions else "partial",
+        candidates=params.attractions,
+        assumptions=["Half-day sightseeing pace assumed unless specified"],
+        cost_usd=0.0,
+        confidence=0.9 if params.attractions else 0.4,
+        provenance=[a.get("id", str(uuid.uuid4())) for a in params.attractions],
+    )
 
     # Pass structured constraints and pre-fetched replies directly so the
     # graph's search_specialists node uses them rather than re-fetching.
@@ -185,6 +224,7 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         "flight_reply": flight_reply,
         "hotel_reply": hotel_reply,
         "restaurant_reply": restaurant_reply,
+        "attraction_reply": attraction_reply,
         "constraints": {
             "origin": params.origin,
             "destination": params.destination,

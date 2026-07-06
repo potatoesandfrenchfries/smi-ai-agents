@@ -38,11 +38,13 @@ with workflow.unsafe.imports_passed_through():
     # Putting them inside the unsafe context prevents Temporal's sandbox from
     # blocking standard library imports that are safe but not deterministic.
     from smi_agent.activities.travel_activities import (
+        AttractionSearchParams,
         FlightSearchParams,
         HotelSearchParams,
         ItineraryParams,
         ItineraryResult,
         RestaurantSearchParams,
+        attraction_search_activity,
         flight_search_activity,
         hotel_search_activity,
         itinerary_generation_activity,
@@ -111,12 +113,16 @@ class ItineraryWorkflow:
     async def run(self, input: ItineraryWorkflowInput) -> ItineraryWorkflowResult:
         workflow.logger.info("Starting itinerary workflow for plan %s", input.plan_id)
 
-        # ── Step 1: Fan out to all three search activities in parallel ─────────
-        # All three run concurrently. Total latency = slowest activity, not sum.
+        # ── Step 1: Fan out to all four search activities in parallel ───────────
+        # All four run concurrently. Total latency = slowest activity, not sum.
         # Temporal retries each independently per _default_retry(); if one still
         # exhausts its retries, return_exceptions=True stops that single failure
-        # from taking down the other two searches (and the whole workflow) with
-        # it — mirrors the isolation the LangGraph layer does one level down.
+        # from taking down the others (and the whole workflow) with it — mirrors
+        # the isolation the LangGraph layer does one level down.
+        #
+        # Attractions are always fetched alongside the rest (mock data, cheap) —
+        # whether they're actually shown depends on the business/leisure
+        # classification the graph makes from raw_goal in itinerary_generation_activity.
         workflow.logger.info("Dispatching parallel search activities...")
 
         search_results = await asyncio.gather(
@@ -151,18 +157,27 @@ class ItineraryWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_default_retry(),
             ),
+            workflow.execute_activity(
+                attraction_search_activity,
+                AttractionSearchParams(
+                    location=input.destination,
+                    sort_by="price" if input.sort_by == "cost" else "rating",
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_default_retry(),
+            ),
             return_exceptions=True,
         )
 
         errors: list[str] = []
-        flights, hotels, restaurants = (
+        flights, hotels, restaurants, attractions = (
             _unwrap_search_result(result, name, errors)
-            for result, name in zip(search_results, ("flight", "hotel", "restaurant"))
+            for result, name in zip(search_results, ("flight", "hotel", "restaurant", "attraction"))
         )
 
         workflow.logger.info(
-            "Search complete — flights: %d, hotels: %d, restaurants: %d",
-            len(flights), len(hotels), len(restaurants),
+            "Search complete — flights: %d, hotels: %d, restaurants: %d, attractions: %d",
+            len(flights), len(hotels), len(restaurants), len(attractions),
         )
         if errors:
             workflow.logger.warning("Search errors (continuing with partial results): %s", errors)
@@ -188,6 +203,7 @@ class ItineraryWorkflow:
                     flights=flights,
                     hotels=hotels,
                     restaurants=restaurants,
+                    attractions=attractions,
                 ),
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=_default_retry(),

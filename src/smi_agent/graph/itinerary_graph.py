@@ -298,6 +298,21 @@ async def parse_intent(state: ItineraryState) -> dict:
 
 # ── Stage 4 · search_business_specialists / search_leisure_specialists ───────
 
+def _reused_replies(state: ItineraryState, names: tuple[str, ...]) -> dict[str, TaskReply]:
+    """Specialist replies already present in state — e.g. pre-fetched by
+    dedicated Temporal search activities before the graph ran (FR-ORC-3: don't
+    silently discard and re-fetch work that's already been done). Keyed like
+    the dispatch output ("flight_reply", "hotel_reply", ...) so callers can
+    merge it straight into their return dict.
+    """
+    reused = {}
+    for name in names:
+        existing = state.get(f"{name}_reply")
+        if existing and existing.get("candidates"):
+            reused[f"{name}_reply"] = existing
+    return reused
+
+
 async def _dispatch(
     state: ItineraryState,
     node_name: str,
@@ -345,34 +360,56 @@ async def search_business_specialists(state: ItineraryState) -> dict:
     constraints = state["constraints"]
     plan_id = state["plan_id"]
 
-    await emitter.emit(
-        "search_business_specialists", "in_progress",
-        "Dispatching schedule-priority flights, proximity hotels, and business-friendly restaurants..."
-    )
+    reused = _reused_replies(state, ("flight", "hotel", "restaurant"))
 
-    flight_task = _make_task_request(
-        goal=f"Find schedule-priority flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
-    hotel_task = _make_task_request(
-        goal=f"Find hotels near the business location in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
-    restaurant_task = _make_task_request(
-        goal=f"Find business-friendly restaurants near {constraints['destination']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
+    task_requests: dict[str, TaskRequest] = {}
+    coros: dict[str, Any] = {}
 
-    return await _dispatch(
-        state,
-        "search_business_specialists",
-        {"flight": flight_task, "hotel": hotel_task, "restaurant": restaurant_task},
-        {
-            "flight": _run_flight(flight_task, constraints, sort_override="time"),
-            "hotel": _run_hotel(hotel_task, constraints, sort_override="proximity", business_only=True),
-            "restaurant": _run_restaurant(restaurant_task, constraints, business_only=True),
-        },
-    )
+    if "flight_reply" not in reused:
+        flight_task = _make_task_request(
+            goal=f"Find schedule-priority flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["flight"] = flight_task
+        coros["flight"] = _run_flight(flight_task, constraints, sort_override="time")
+
+    if "hotel_reply" not in reused:
+        hotel_task = _make_task_request(
+            goal=f"Find hotels near the business location in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["hotel"] = hotel_task
+        coros["hotel"] = _run_hotel(hotel_task, constraints, sort_override="proximity", business_only=True)
+
+    if "restaurant_reply" not in reused:
+        restaurant_task = _make_task_request(
+            goal=f"Find business-friendly restaurants near {constraints['destination']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["restaurant"] = restaurant_task
+        coros["restaurant"] = _run_restaurant(restaurant_task, constraints, business_only=True)
+
+    if not coros:
+        await emitter.emit("search_business_specialists", "completed", "All specialist results reused from pre-fetch")
+        plan_graph = dict(state.get("plan_graph") or {})
+        plan_graph["stages"] = plan_graph.get("stages", []) + ["search_business_specialists"]
+        return {**reused, "plan_graph": plan_graph, "current_node": "search_business_specialists"}
+
+    if reused:
+        await emitter.emit(
+            "search_business_specialists", "in_progress",
+            f"Reusing pre-fetched {', '.join(n.removesuffix('_reply') for n in reused)}; "
+            f"fetching {', '.join(coros)}..."
+        )
+    else:
+        await emitter.emit(
+            "search_business_specialists", "in_progress",
+            "Dispatching schedule-priority flights, proximity hotels, and business-friendly restaurants..."
+        )
+
+    result = await _dispatch(state, "search_business_specialists", task_requests, coros)
+    result.update(reused)
+    return result
 
 
 async def search_leisure_specialists(state: ItineraryState) -> dict:
@@ -384,39 +421,64 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
     constraints = state["constraints"]
     plan_id = state["plan_id"]
 
-    await emitter.emit(
-        "search_leisure_specialists", "in_progress",
-        "Dispatching flight, hotel, restaurant, and attraction searches in parallel..."
-    )
+    reused = _reused_replies(state, ("flight", "hotel", "restaurant", "attraction"))
 
-    flight_task = _make_task_request(
-        goal=f"Find flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
-    hotel_task = _make_task_request(
-        goal=f"Find hotels in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
-    restaurant_task = _make_task_request(
-        goal=f"Find restaurants in {constraints['destination']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
-    attraction_task = _make_task_request(
-        goal=f"Find tourist attractions and experiences in {constraints['destination']}",
-        constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-    )
+    task_requests: dict[str, TaskRequest] = {}
+    coros: dict[str, Any] = {}
 
-    return await _dispatch(
-        state,
-        "search_leisure_specialists",
-        {"flight": flight_task, "hotel": hotel_task, "restaurant": restaurant_task, "attraction": attraction_task},
-        {
-            "flight": _run_flight(flight_task, constraints),
-            "hotel": _run_hotel(hotel_task, constraints),
-            "restaurant": _run_restaurant(restaurant_task, constraints),
-            "attraction": _run_attractions(attraction_task, constraints),
-        },
-    )
+    if "flight_reply" not in reused:
+        flight_task = _make_task_request(
+            goal=f"Find flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["flight"] = flight_task
+        coros["flight"] = _run_flight(flight_task, constraints)
+
+    if "hotel_reply" not in reused:
+        hotel_task = _make_task_request(
+            goal=f"Find hotels in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["hotel"] = hotel_task
+        coros["hotel"] = _run_hotel(hotel_task, constraints)
+
+    if "restaurant_reply" not in reused:
+        restaurant_task = _make_task_request(
+            goal=f"Find restaurants in {constraints['destination']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["restaurant"] = restaurant_task
+        coros["restaurant"] = _run_restaurant(restaurant_task, constraints)
+
+    if "attraction_reply" not in reused:
+        attraction_task = _make_task_request(
+            goal=f"Find tourist attractions and experiences in {constraints['destination']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["attraction"] = attraction_task
+        coros["attraction"] = _run_attractions(attraction_task, constraints)
+
+    if not coros:
+        await emitter.emit("search_leisure_specialists", "completed", "All specialist results reused from pre-fetch")
+        plan_graph = dict(state.get("plan_graph") or {})
+        plan_graph["stages"] = plan_graph.get("stages", []) + ["search_leisure_specialists"]
+        return {**reused, "plan_graph": plan_graph, "current_node": "search_leisure_specialists"}
+
+    if reused:
+        await emitter.emit(
+            "search_leisure_specialists", "in_progress",
+            f"Reusing pre-fetched {', '.join(n.removesuffix('_reply') for n in reused)}; "
+            f"fetching {', '.join(coros)}..."
+        )
+    else:
+        await emitter.emit(
+            "search_leisure_specialists", "in_progress",
+            "Dispatching flight, hotel, restaurant, and attraction searches in parallel..."
+        )
+
+    result = await _dispatch(state, "search_leisure_specialists", task_requests, coros)
+    result.update(reused)
+    return result
 
 
 async def _run_flight(

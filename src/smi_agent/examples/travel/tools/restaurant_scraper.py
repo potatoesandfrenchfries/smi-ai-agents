@@ -153,6 +153,9 @@ def _seeded_restaurants(location: str, cuisine: str | None) -> list[dict[str, An
 
         lo, hi = spend_ranges[price_band]
         avg_spend = rng.randint(lo, hi)
+        # Business-friendly proxy: pricier venues with sit-down service tend to
+        # suit client dining/work meals better than quick street-food spots.
+        business_friendly = price_band in ("£££", "££££") or rng.random() > 0.6
 
         results.append({
             "id": f"RST-{seed % 10000:04d}-{i}",
@@ -167,6 +170,7 @@ def _seeded_restaurants(location: str, cuisine: str | None) -> list[dict[str, An
             "highlight": highlight,
             "booking_required": rng.random() > 0.5,
             "cuisine_match": cuisine is not None and c.lower() == cuisine.lower(),
+            "business_friendly": business_friendly,
         })
     return results
 
@@ -242,6 +246,7 @@ def _normalise_overpass(elements: list[dict], location: str) -> list[dict[str, A
             "highlight": tags.get("description", ""),
             "booking_required": False,
             "cuisine_match": False,
+            "business_friendly": False,
         })
     return results
 

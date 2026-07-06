@@ -20,7 +20,7 @@ class TripConstraints(TypedDict):
     check_in: str | None         # YYYY-MM-DD
     check_out: str | None        # YYYY-MM-DD
     budget_gbp: float | None     # Total trip budget
-    purpose: str | None          # "leisure" | "business" | "corporate"
+    purpose: str | None          # "business" | "leisure"
     traveler_count: int          # Default 1
     sort_preference: str         # "cost" | "comfort" | "time" | "rating"
 
@@ -62,6 +62,7 @@ class ItineraryState(TypedDict):
     # ── Stage 2 · Intake ──────────────────────────────────────────────────────
     constraints: NotRequired[TripConstraints | None]
     needs_input: NotRequired[list[str]]   # Missing required fields (triggers FR-INT-3 prompt)
+    trip_type: NotRequired[Literal["business", "leisure"]]  # Derived from constraints.purpose — drives graph routing
 
     # ── Stage 3 · Plan graph (FR-ORC-6) ──────────────────────────────────────
     plan_graph: NotRequired[dict]         # Decomposition + dispatch + merge record
@@ -70,6 +71,7 @@ class ItineraryState(TypedDict):
     flight_reply: NotRequired[TaskReply | None]
     hotel_reply: NotRequired[TaskReply | None]
     restaurant_reply: NotRequired[TaskReply | None]
+    attraction_reply: NotRequired[TaskReply | None]   # Leisure path only
 
     # ── Stage 5 · Merge + policy ──────────────────────────────────────────────
     policy_status: NotRequired[Literal["compliant", "breach", "pending"]]

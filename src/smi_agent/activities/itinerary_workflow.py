@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any
 
 from temporalio import workflow
 
@@ -112,10 +113,13 @@ class ItineraryWorkflow:
 
         # ── Step 1: Fan out to all three search activities in parallel ─────────
         # All three run concurrently. Total latency = slowest activity, not sum.
-        # If one fails, Temporal retries it independently — others are not affected.
+        # Temporal retries each independently per _default_retry(); if one still
+        # exhausts its retries, return_exceptions=True stops that single failure
+        # from taking down the other two searches (and the whole workflow) with
+        # it — mirrors the isolation the LangGraph layer does one level down.
         workflow.logger.info("Dispatching parallel search activities...")
 
-        flights, hotels, restaurants = await asyncio.gather(
+        search_results = await asyncio.gather(
             workflow.execute_activity(
                 flight_search_activity,
                 FlightSearchParams(
@@ -147,33 +151,54 @@ class ItineraryWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_default_retry(),
             ),
+            return_exceptions=True,
+        )
+
+        errors: list[str] = []
+        flights, hotels, restaurants = (
+            _unwrap_search_result(result, name, errors)
+            for result, name in zip(search_results, ("flight", "hotel", "restaurant"))
         )
 
         workflow.logger.info(
             "Search complete — flights: %d, hotels: %d, restaurants: %d",
             len(flights), len(hotels), len(restaurants),
         )
+        if errors:
+            workflow.logger.warning("Search errors (continuing with partial results): %s", errors)
 
         # ── Step 2: Generate the itinerary from search results ─────────────────
         # Sequential — needs all three search results to compile a coherent plan.
-        itinerary: ItineraryResult = await workflow.execute_activity(
-            itinerary_generation_activity,
-            ItineraryParams(
+        # Unlike the search fan-out, there's nothing to isolate a failure from
+        # here — if this activity exhausts its retries, catch it and return a
+        # typed error result instead of letting an ActivityError escape run()
+        # as an uncaught workflow failure.
+        try:
+            itinerary: ItineraryResult = await workflow.execute_activity(
+                itinerary_generation_activity,
+                ItineraryParams(
+                    plan_id=input.plan_id,
+                    tenant_id=input.tenant_id,
+                    raw_goal=input.raw_goal,
+                    origin=input.origin,
+                    destination=input.destination,
+                    check_in=input.check_in,
+                    check_out=input.check_out,
+                    sort_by=input.sort_by,
+                    flights=flights,
+                    hotels=hotels,
+                    restaurants=restaurants,
+                ),
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=_default_retry(),
+            )
+        except Exception as exc:
+            workflow.logger.error("itinerary_generation_activity failed after retries: %s", exc)
+            return ItineraryWorkflowResult(
                 plan_id=input.plan_id,
-                tenant_id=input.tenant_id,
-                raw_goal=input.raw_goal,
-                origin=input.origin,
-                destination=input.destination,
-                check_in=input.check_in,
-                check_out=input.check_out,
-                sort_by=input.sort_by,
-                flights=flights,
-                hotels=hotels,
-                restaurants=restaurants,
-            ),
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=_default_retry(),
-        )
+                status="error",
+                errors=errors + [f"itinerary_generation: {exc}"],
+            )
 
         workflow.logger.info(
             "Itinerary ready — status: %s, policy: %s",
@@ -188,9 +213,25 @@ class ItineraryWorkflow:
             total_cost_gbp=itinerary.total_cost_gbp,
             policy_status=itinerary.policy_status,
             assumptions=itinerary.assumptions,
-            errors=itinerary.errors,
+            errors=errors + itinerary.errors,
             budget_alternatives=itinerary.budget_alternatives,
         )
+
+
+# ── Exception handling ────────────────────────────────────────────────────────
+
+def _unwrap_search_result(result: Any, name: str, errors: list[str]) -> list[dict]:
+    """Convert one gathered activity result (value or exception) into a list.
+
+    Isolates a single search activity's exhausted-retries failure from the
+    other two — the workflow degrades to partial results instead of failing
+    outright, with the failure recorded in errors for the caller to see.
+    """
+    if isinstance(result, BaseException):
+        workflow.logger.error("%s_search_activity failed after retries: %s", name, result)
+        errors.append(f"{name}_search: {result}")
+        return []
+    return result
 
 
 # ── Retry policy ──────────────────────────────────────────────────────────────

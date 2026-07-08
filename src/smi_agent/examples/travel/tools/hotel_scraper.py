@@ -1,12 +1,19 @@
 """Hotel search tool — scrapes/queries for available hotels at a location.
 
-Prototype implementation: attempts a real HTTP request to a public hotel data
-source, falls back to seeded mock data for development.
+Prototype implementation: attempts a real Overpass API query (OpenStreetMap
+data, no key required — same source restaurant_scraper.py and
+attraction_scraper.py use), falls back to seeded mock data on any failure.
+
+OSM carries real hotel names, addresses, and sometimes stars/room counts —
+but never nightly rates. Like attraction entry fees, pricing is deliberately
+left None for live results rather than guessed; a dedicated pricing
+specialist is expected to fill it in per-recommendation later.
 
 Sort options:
-    price      — cheapest nightly rate first
-    rating     — highest guest review score first
-    proximity  — closest to city centre first
+    price      — cheapest nightly rate first (unpriced results sort last)
+    rating     — highest guest review score first (mock data only; live data
+                 has no rating)
+    proximity  — closest to city centre first (unpriced results sort last)
 """
 
 from __future__ import annotations
@@ -133,38 +140,105 @@ async def search_hotels(
     return hotels[:num_results]
 
 
+_OSM_TOURISM_VALUES = ("hotel", "guest_house", "hostel", "motel")
+
+
 async def _fetch_hotels(location: str, check_in: str, check_out: str) -> list[dict[str, Any]]:
-    """Attempt real HTTP fetch; fall back to mock data on any failure."""
+    """Attempt Overpass API query; fall back to mock data on any failure.
+
+    Node-only (no way/relation geometries) — testing showed way-tagged
+    "hotel" buildings pull in a lot of mistagged/irrelevant OSM data in some
+    regions, while nodes give clean, real results.
+    """
     try:
         import httpx
 
-        # Prototype target: Open-Meteo / Nominatim for geocoding to demonstrate
-        # the HTTP pattern. Replace with a hotel API (e.g. Booking.com affiliate,
-        # RapidAPI Hotels) in production.
-        url = (
-            f"https://nominatim.openstreetmap.org/search"
-            f"?q={location}&format=json&limit=1"
+        tourism_filter = "|".join(_OSM_TOURISM_VALUES)
+        query = (
+            f'[out:json][timeout:10];'
+            f'area[name="{location}"]->.a;'
+            f'node["tourism"~"{tourism_filter}"](area.a);'
+            f'out body 10;'
         )
-        async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": "Smartinerary/0.1"}) as client:
-            response = await client.get(url)
-            if response.status_code == 200 and response.json():
-                # Geocoding worked — in production we'd pass lat/lon to a hotel API.
-                # For prototype, use the confirmed location name with mock data.
-                geo = response.json()[0]
-                logger.debug("Hotel geo lookup OK: %s", geo.get("display_name"))
+        # Overpass/OSM infra rejects requests with no (or a generic) User-Agent.
+        async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Smartinerary/0.1"}) as client:
+            response = await client.post(
+                "https://overpass-api.de/api/interpreter",
+                data={"data": query},
+            )
+            if response.status_code == 200:
+                elements = response.json().get("elements", [])
+                if elements:
+                    return _normalise_overpass(elements, location, check_in, check_out)
     except Exception as exc:
         logger.debug("Hotel HTTP fetch failed (%s) — using mock data", exc)
 
     return _seeded_hotels(location, check_in, check_out)
 
 
+def _parse_int(value: Any) -> int | None:
+    """Best-effort int parse for OSM tag values like "4" or self-assessed "4s"."""
+    if value is None:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits) if digits else None
+
+
+def _normalise_overpass(
+    elements: list[dict], location: str, check_in: str, check_out: str,
+) -> list[dict[str, Any]]:
+    """Map Overpass/OSM fields to our internal hotel schema.
+
+    OSM has no nightly-rate data at all (not even a qualitative band like
+    restaurants' price_range), so price_per_night_gbp/total_price_gbp come
+    back None for live results — left for a pricing specialist to fill in.
+    """
+    nights = _nights(check_in, check_out)
+    results = []
+    for i, el in enumerate(elements):
+        tags = el.get("tags", {})
+        amenities = []
+        if tags.get("internet_access") in ("wlan", "yes"):
+            amenities.append("Free WiFi")
+        if tags.get("wheelchair") == "yes":
+            amenities.append("Wheelchair accessible")
+        if "parking" in tags:
+            amenities.append("Parking")
+        if tags.get("smoking") == "no":
+            amenities.append("Non-smoking")
+
+        results.append({
+            "id": f"OSM-{el.get('id', i)}",
+            "name": tags.get("name", "Unnamed Hotel"),
+            "location": location,
+            "stars": _parse_int(tags.get("stars")),
+            "rating": None,
+            "review_count": None,
+            "price_per_night_gbp": None,
+            "total_price_gbp": None,
+            "nights": nights,
+            "distance_from_centre_km": None,
+            "amenities": amenities,
+            "check_in": check_in,
+            "check_out": check_out,
+            "rooms_available": _parse_int(tags.get("rooms")),
+        })
+    return results
+
+
 def _sort(hotels: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
     if sort_by == "price":
-        return sorted(hotels, key=lambda h: h["price_per_night_gbp"])
+        return sorted(
+            hotels,
+            key=lambda h: h["price_per_night_gbp"] if h.get("price_per_night_gbp") is not None else float("inf"),
+        )
     if sort_by == "rating":
-        return sorted(hotels, key=lambda h: h["rating"], reverse=True)
+        return sorted(hotels, key=lambda h: h.get("rating") or 0, reverse=True)
     if sort_by == "proximity":
-        return sorted(hotels, key=lambda h: h["distance_from_centre_km"])
+        return sorted(
+            hotels,
+            key=lambda h: h["distance_from_centre_km"] if h.get("distance_from_centre_km") is not None else float("inf"),
+        )
     return hotels
 
 

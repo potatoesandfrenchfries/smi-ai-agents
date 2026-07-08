@@ -196,10 +196,34 @@ async def parse_intent(state: ItineraryState) -> dict:
     natural date expressions ("9th September", "4 days from Monday") and synonyms.
     Fallback: regex keyword extraction when the LLM call fails.
 
+    HITL edit re-runs set skip_reparse=True and supply constraints directly
+    (e.g. an updated budget_gbp) — trust those as-is instead of re-deriving
+    from raw_goal, both because raw_goal hasn't changed (so re-parsing would
+    just discard the edit) and because it avoids a wasted LLM call per edit.
+
     Implements: FR-INT-1 (accept NL goal), FR-INT-2 (parse into Trip + Constraints),
                 FR-INT-3 (identify missing fields).
     """
     emitter = _emitter(state)
+
+    if state.get("skip_reparse") and state.get("constraints"):
+        constraints = state["constraints"]
+        missing = _missing_fields(constraints)
+        trip_type = _classify_trip_type(constraints.get("purpose"))
+        await emitter.emit("parse_intent", "completed", f"Using edited constraints | trip_type={trip_type}")
+        return {
+            "constraints": constraints,
+            "needs_input": missing,
+            "trip_type": trip_type,
+            "current_node": "parse_intent",
+            "plan_graph": {
+                "plan_id": state["plan_id"],
+                "raw_goal": state["raw_goal"],
+                "parsed_at": datetime.utcnow().isoformat(),
+                "stages": ["parse_intent"],
+            },
+        }
+
     await emitter.emit("parse_intent", "in_progress", "Parsing travel goal...")
 
     goal = state["raw_goal"]

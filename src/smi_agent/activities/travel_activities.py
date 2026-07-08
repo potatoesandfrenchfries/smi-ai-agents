@@ -71,6 +71,12 @@ class ItineraryParams:
     hotels: list[dict] = field(default_factory=list)
     restaurants: list[dict] = field(default_factory=list)
     attractions: list[dict] = field(default_factory=list)
+    # HITL edit re-runs (FR-PRS-2): when set, skip_reparse tells parse_intent to
+    # trust resolved_constraints as-is (e.g. an edited budget_gbp) instead of
+    # re-deriving everything from raw_goal, which would otherwise silently
+    # discard the edit and waste an LLM call.
+    resolved_constraints: dict | None = None
+    skip_reparse: bool = False
 
 
 @dataclass
@@ -84,6 +90,7 @@ class ItineraryResult:
     assumptions: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
+    resolved_constraints: dict = field(default_factory=dict)  # What parse_intent resolved — carried forward for HITL edits
 
 
 # ── Activities ────────────────────────────────────────────────────────────────
@@ -215,6 +222,21 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         provenance=[a.get("id", str(uuid.uuid4())) for a in params.attractions],
     )
 
+    constraints_payload = (
+        params.resolved_constraints
+        if params.skip_reparse and params.resolved_constraints
+        else {
+            "origin": params.origin,
+            "destination": params.destination,
+            "check_in": params.check_in,
+            "check_out": params.check_out,
+            "budget_gbp": params.budget_gbp,
+            "purpose": "leisure",
+            "traveler_count": 1,
+            "sort_preference": params.sort_by,
+        }
+    )
+
     # Pass structured constraints and pre-fetched replies directly so the
     # graph's search_specialists node uses them rather than re-fetching.
     result = await graph.ainvoke({
@@ -225,16 +247,8 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         "hotel_reply": hotel_reply,
         "restaurant_reply": restaurant_reply,
         "attraction_reply": attraction_reply,
-        "constraints": {
-            "origin": params.origin,
-            "destination": params.destination,
-            "check_in": params.check_in,
-            "check_out": params.check_out,
-            "budget_gbp": params.budget_gbp,
-            "purpose": "leisure",
-            "traveler_count": 1,
-            "sort_preference": params.sort_by,
-        },
+        "constraints": constraints_payload,
+        "skip_reparse": params.skip_reparse,
         "needs_input": [],
     })
 
@@ -258,4 +272,5 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         assumptions=itin.get("assumptions", []),
         errors=result.get("errors") or [],
         budget_alternatives=result.get("budget_alternatives") or [],
+        resolved_constraints=result.get("constraints") or {},
     )

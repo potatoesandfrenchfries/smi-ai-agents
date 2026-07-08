@@ -63,6 +63,7 @@ class ItineraryState(TypedDict):
     constraints: NotRequired[TripConstraints | None]
     needs_input: NotRequired[list[str]]   # Missing required fields (triggers FR-INT-3 prompt)
     trip_type: NotRequired[Literal["business", "leisure"]]  # Derived from constraints.purpose — drives graph routing
+    skip_reparse: NotRequired[bool]       # HITL edit re-runs: trust pre-supplied constraints, don't re-derive from raw_goal
 
     # ── Stage 3 · Plan graph (FR-ORC-6) ──────────────────────────────────────
     plan_graph: NotRequired[dict]         # Decomposition + dispatch + merge record

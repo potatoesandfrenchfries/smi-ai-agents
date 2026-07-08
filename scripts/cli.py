@@ -11,6 +11,7 @@ import uuid
 from temporalio.client import Client
 
 from smi_agent.activities.itinerary_workflow import ItineraryWorkflow, ItineraryWorkflowInput
+from hitl_review import run_review_loop, wait_for_first_itinerary
 
 
 def prompt(label: str, default: str = "") -> str:
@@ -65,15 +66,17 @@ async def main() -> None:
         print("Cancelled.")
         return
 
-    # ── Connect and submit ────────────────────────────────────────────────────
+    # ── Connect and start the workflow ────────────────────────────────────────
+    # start_workflow (not execute_workflow) because HITL needs a handle to
+    # signal/query while the workflow is paused in its review loop.
     print()
     print("Connecting to Temporal ...")
     client = await Client.connect("localhost:7233")
 
-    print("Running workflow (flight + hotel + restaurant searches in parallel) ...")
+    print("Running workflow (flight + hotel + restaurant + attraction searches in parallel) ...")
     print()
 
-    result = await client.execute_workflow(
+    handle = await client.start_workflow(
         ItineraryWorkflow.run,
         ItineraryWorkflowInput(
             plan_id=plan_id,
@@ -89,59 +92,15 @@ async def main() -> None:
         task_queue="smartinerary",
     )
 
-    # ── Print result ──────────────────────────────────────────────────────────
-    print("=== ITINERARY ===")
-
-    if result.policy_status == "breach":
-        print(f"Status      : needs approval")
-        print(f"Total cost  : £{result.total_cost_gbp:.2f}")
-        print()
-        if result.budget_alternatives:
-            print("The estimated cost exceeds your budget. Cheaper alternatives:")
-            for i, alt in enumerate(result.budget_alternatives, start=1):
-                fit = "within budget" if alt.get("within_budget") else "still over budget"
-                print(
-                    f"  {i}. {alt['label']} — £{alt['total_cost_gbp']:.2f} "
-                    f"(saves £{alt['savings_gbp']:.2f}, {fit})"
-                )
-        else:
-            print("The estimated cost exceeds your budget, and no cheaper combination")
-            print("was found among the current candidates — try a higher budget instead.")
+    itinerary = await wait_for_first_itinerary(handle)
+    if itinerary is None:
+        print("Timed out waiting for the itinerary to be generated.")
+        print(f"Temporal UI: http://localhost:8233/namespaces/default/workflows/cli-{plan_id}")
         return
 
-    print(f"Status      : {result.status}")
-    print(f"Policy      : {result.policy_status}")
-    if result.total_cost_gbp:
-        print(f"Total cost  : £{result.total_cost_gbp:.2f}")
+    await run_review_loop(handle, itinerary)
 
     print()
-    print("Segments:")
-    for seg in result.segments:
-        price = f"  £{seg['price_gbp']:.2f}" if seg.get("price_gbp") else ""
-        print(f"  [{seg['type'].upper()}] {seg['summary']}{price}")
-        print(f"           Provider : {seg['provider']}")
-        print(f"           Book at  : {seg['handoff_link']}")
-
-    if result.dining_options:
-        print()
-        print("Dining options:")
-        for r in result.dining_options:
-            print(f"  {r.get('name')} — {r.get('cuisine')} — {r.get('price_band')}")
-
-    if result.assumptions:
-        print()
-        print("Assumptions:")
-        for a in result.assumptions:
-            print(f"  - {a}")
-
-    if result.errors:
-        print()
-        print("Errors:")
-        for e in result.errors:
-            print(f"  - {e}")
-
-    print()
-    print("Itinerary is awaiting your confirmation before any booking is made.")
     print(f"Temporal UI: http://localhost:8233/namespaces/default/workflows/cli-{plan_id}")
 
 

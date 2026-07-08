@@ -17,11 +17,29 @@ Flow
 ────
   ItineraryWorkflow.run()
     │
-    ├── flight_search_activity  ┐
-    ├── hotel_search_activity   ├─ parallel (asyncio.gather)
-    └── restaurant_search_activity┘
+    ├── flight_search_activity      ┐
+    ├── hotel_search_activity       ├─ parallel (asyncio.gather)
+    ├── restaurant_search_activity  │
+    └── attraction_search_activity  ┘
                 │
                 └── itinerary_generation_activity  (sequential — needs search results)
+                            │
+                            ▼
+                  ── HITL review loop (FR-GAT-3, FR-PRS-2) ──
+                  Workflow pauses here via wait_condition and
+                  waits for a signal:
+                    confirm()          → proceed, return final result
+                    reject()           → end, status="rejected"
+                    request_changes()  → reorder one section's candidates
+                                         (or override budget_gbp), re-run
+                                         itinerary_generation_activity with
+                                         skip_reparse=True so ONLY
+                                         merge/policy/compile re-run — the
+                                         search activities are NOT re-invoked,
+                                         satisfying "modify only the requested
+                                         section without regenerating the
+                                         entire itinerary". Then loops back
+                                         to waiting.
 """
 
 from __future__ import annotations
@@ -70,7 +88,7 @@ class ItineraryWorkflowInput:
 @dataclass
 class ItineraryWorkflowResult:
     plan_id: str
-    status: str
+    status: str  # "confirmed" | "rejected" | "review_timed_out" | "error" | "needs_approval"
     segments: list[dict] = field(default_factory=list)
     dining_options: list[dict] = field(default_factory=list)
     total_cost_gbp: float | None = None
@@ -78,6 +96,23 @@ class ItineraryWorkflowResult:
     assumptions: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
+
+
+@dataclass
+class ItineraryEditRequest:
+    """A targeted, single-section edit signalled by the traveler during review.
+
+    Exactly one of candidate_id / budget_gbp is meaningful, depending on section:
+      section="budget"                        → budget_gbp is the new limit
+      section in flight/hotel/restaurant/attraction → candidate_id picks which
+        already-fetched candidate to promote to "chosen" for that section
+    """
+    section: str  # "flight" | "hotel" | "restaurant" | "attraction" | "budget"
+    candidate_id: str | None = None
+    budget_gbp: float | None = None
+
+
+_EDITABLE_SECTIONS = {"flight", "hotel", "restaurant", "attraction", "budget"}
 
 
 # ── Workflow ──────────────────────────────────────────────────────────────────
@@ -108,6 +143,51 @@ class ItineraryWorkflow:
             task_queue="smartinerary",
         )
     """
+
+    def __init__(self) -> None:
+        self._itinerary: ItineraryResult | None = None
+        self._constraints: dict = {}
+        self._replies: dict[str, list[dict]] = {}
+        self._confirmed = False
+        self._rejected = False
+        self._pending_edit: ItineraryEditRequest | None = None
+        self._edit_log: list[str] = []
+
+    # ── Signals (traveler → workflow) ───────────────────────────────────────
+
+    @workflow.signal
+    async def confirm(self) -> None:
+        self._confirmed = True
+
+    @workflow.signal
+    async def reject(self) -> None:
+        self._rejected = True
+
+    @workflow.signal
+    async def request_changes(self, edit: ItineraryEditRequest) -> None:
+        if edit.section not in _EDITABLE_SECTIONS:
+            workflow.logger.warning("Ignoring edit for unknown section: %s", edit.section)
+            return
+        self._pending_edit = edit
+
+    # ── Queries (traveler ← workflow, read-only) ────────────────────────────
+
+    @workflow.query
+    def current_itinerary(self) -> ItineraryResult | None:
+        """The itinerary as of the last completed generation/edit."""
+        return self._itinerary
+
+    @workflow.query
+    def available_options(self) -> dict[str, list[dict]]:
+        """Full candidate lists per section, for the traveler to pick from
+        when requesting a change (not just the single "best" one shown in
+        the compiled itinerary's segments).
+        """
+        return self._replies
+
+    @workflow.query
+    def edit_log(self) -> list[str]:
+        return self._edit_log
 
     @workflow.run
     async def run(self, input: ItineraryWorkflowInput) -> ItineraryWorkflowResult:
@@ -182,6 +262,14 @@ class ItineraryWorkflow:
         if errors:
             workflow.logger.warning("Search errors (continuing with partial results): %s", errors)
 
+        # Full candidate lists per section, kept on the workflow instance so a
+        # later request_changes() signal can pick a different one without
+        # re-invoking any search activity.
+        self._replies = {
+            "flight": flights, "hotel": hotels,
+            "restaurant": restaurants, "attraction": attractions,
+        }
+
         # ── Step 2: Generate the itinerary from search results ─────────────────
         # Sequential — needs all three search results to compile a coherent plan.
         # Unlike the search fan-out, there's nothing to isolate a failure from
@@ -216,22 +304,109 @@ class ItineraryWorkflow:
                 errors=errors + [f"itinerary_generation: {exc}"],
             )
 
+        self._itinerary = itinerary
+        self._constraints = itinerary.resolved_constraints
+
         workflow.logger.info(
-            "Itinerary ready — status: %s, policy: %s",
+            "Itinerary ready for review — status: %s, policy: %s",
             itinerary.status, itinerary.policy_status,
         )
 
+        # ── Step 3: HITL review loop (FR-GAT-3, FR-PRS-2) ───────────────────────
+        # Pause here — durably, Temporal persists this wait — until the traveler
+        # confirms, rejects, or requests a targeted edit. An edit reorders just
+        # that section's already-fetched candidates (or overrides budget_gbp)
+        # and re-runs itinerary_generation_activity with skip_reparse=True, so
+        # only merge_results/policy_check/compile_itinerary redo work — the
+        # search activities are never re-invoked. Loops until confirmed/rejected
+        # or the review window elapses.
+        review_deadline = timedelta(hours=24)
+        while True:
+            try:
+                await workflow.wait_condition(
+                    lambda: self._confirmed or self._rejected or self._pending_edit is not None,
+                    timeout=review_deadline,
+                )
+            except TimeoutError:
+                workflow.logger.warning("Review window elapsed with no traveler response")
+                return ItineraryWorkflowResult(
+                    plan_id=input.plan_id,
+                    status="review_timed_out",
+                    segments=self._itinerary.segments,
+                    total_cost_gbp=self._itinerary.total_cost_gbp,
+                    policy_status=self._itinerary.policy_status,
+                    errors=errors + ["No confirmation or edit received within the review window"],
+                )
+
+            if self._rejected:
+                workflow.logger.info("Itinerary rejected by traveler")
+                return ItineraryWorkflowResult(plan_id=input.plan_id, status="rejected", errors=errors)
+
+            if self._pending_edit is not None:
+                edit = self._pending_edit
+                self._pending_edit = None
+                workflow.logger.info("Applying edit: section=%s candidate_id=%s budget_gbp=%s",
+                                      edit.section, edit.candidate_id, edit.budget_gbp)
+
+                if edit.section == "budget" and edit.budget_gbp is not None:
+                    self._constraints = {**self._constraints, "budget_gbp": edit.budget_gbp}
+                    self._edit_log.append(f"budget → £{edit.budget_gbp:.2f}")
+                elif edit.candidate_id is not None:
+                    before = self._replies.get(edit.section, [])
+                    self._replies[edit.section] = _reorder_to_front(before, edit.candidate_id)
+                    self._edit_log.append(f"{edit.section} → {edit.candidate_id}")
+
+                try:
+                    self._itinerary = await workflow.execute_activity(
+                        itinerary_generation_activity,
+                        ItineraryParams(
+                            plan_id=input.plan_id,
+                            tenant_id=input.tenant_id,
+                            raw_goal=input.raw_goal,
+                            flights=self._replies.get("flight", []),
+                            hotels=self._replies.get("hotel", []),
+                            restaurants=self._replies.get("restaurant", []),
+                            attractions=self._replies.get("attraction", []),
+                            resolved_constraints=self._constraints,
+                            skip_reparse=True,
+                        ),
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=_default_retry(),
+                    )
+                    self._constraints = self._itinerary.resolved_constraints or self._constraints
+                except Exception as exc:
+                    workflow.logger.error("Edit re-run failed: %s", exc)
+                    errors.append(f"edit_apply: {exc}")
+                continue
+
+            if self._confirmed:
+                break
+
+        workflow.logger.info("Itinerary confirmed by traveler")
         return ItineraryWorkflowResult(
             plan_id=input.plan_id,
-            status=itinerary.status,
-            segments=itinerary.segments,
-            dining_options=itinerary.dining_options,
-            total_cost_gbp=itinerary.total_cost_gbp,
-            policy_status=itinerary.policy_status,
-            assumptions=itinerary.assumptions,
-            errors=errors + itinerary.errors,
-            budget_alternatives=itinerary.budget_alternatives,
+            status="confirmed",
+            segments=self._itinerary.segments,
+            dining_options=self._itinerary.dining_options,
+            total_cost_gbp=self._itinerary.total_cost_gbp,
+            policy_status=self._itinerary.policy_status,
+            assumptions=self._itinerary.assumptions,
+            errors=errors + self._itinerary.errors,
+            budget_alternatives=self._itinerary.budget_alternatives,
         )
+
+
+# ── Edit application ──────────────────────────────────────────────────────────
+
+def _reorder_to_front(candidates: list[dict], candidate_id: str) -> list[dict]:
+    """Promote the traveler's chosen candidate to the front of the list.
+
+    merge_results/compile_itinerary always treat candidates[0] as "the pick",
+    so reordering is all a section edit needs — no re-fetch, no data loss (the
+    other candidates stay available for a later edit). No-ops if the id isn't
+    found, leaving the original order untouched.
+    """
+    return sorted(candidates, key=lambda c: c.get("id") != candidate_id)
 
 
 # ── Exception handling ────────────────────────────────────────────────────────

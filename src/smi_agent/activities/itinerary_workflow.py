@@ -68,6 +68,7 @@ with workflow.unsafe.imports_passed_through():
         itinerary_generation_activity,
         restaurant_search_activity,
     )
+    from smi_agent.examples.travel.tools.location_resolver import to_city_name, to_iata
 
 
 # ── Workflow input / output ───────────────────────────────────────────────────
@@ -205,12 +206,20 @@ class ItineraryWorkflow:
         # classification the graph makes from raw_goal in itinerary_generation_activity.
         workflow.logger.info("Dispatching parallel search activities...")
 
+        # Flight search needs an IATA code; the OSM-backed hotel/restaurant/
+        # attraction searches need a real place name — resolve both forms
+        # once here rather than passing the same (likely IATA) destination
+        # to every activity and having the OSM-based ones silently fail to
+        # match anything real.
+        destination_city = to_city_name(input.destination)
+        destination_iata = to_iata(input.destination)
+
         search_results = await asyncio.gather(
             workflow.execute_activity(
                 flight_search_activity,
                 FlightSearchParams(
-                    origin=input.origin,
-                    destination=input.destination,
+                    origin=to_iata(input.origin),
+                    destination=destination_iata,
                     date=input.check_in,
                     sort_by=input.sort_by,
                 ),
@@ -220,7 +229,7 @@ class ItineraryWorkflow:
             workflow.execute_activity(
                 hotel_search_activity,
                 HotelSearchParams(
-                    location=input.destination,
+                    location=destination_city,
                     check_in=input.check_in,
                     check_out=input.check_out,
                     sort_by="rating" if input.sort_by == "comfort" else "price",
@@ -231,7 +240,7 @@ class ItineraryWorkflow:
             workflow.execute_activity(
                 restaurant_search_activity,
                 RestaurantSearchParams(
-                    location=input.destination,
+                    location=destination_city,
                     cuisine=input.cuisine_preference,
                 ),
                 start_to_close_timeout=timedelta(seconds=30),
@@ -240,7 +249,7 @@ class ItineraryWorkflow:
             workflow.execute_activity(
                 attraction_search_activity,
                 AttractionSearchParams(
-                    location=input.destination,
+                    location=destination_city,
                     sort_by="price" if input.sort_by == "cost" else "rating",
                 ),
                 start_to_close_timeout=timedelta(seconds=30),

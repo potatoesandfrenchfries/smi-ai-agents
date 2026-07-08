@@ -568,8 +568,9 @@ async def _run_restaurant(
 
 async def _run_attractions(task: TaskRequest, constraints: TripConstraints) -> TaskReply:
     from smi_agent.examples.travel.tools.attraction_scraper import search_attractions
+    from smi_agent.examples.travel.tools.location_resolver import to_city_name
     sort_by = "price" if constraints.get("sort_preference") == "cost" else "rating"
-    results = await search_attractions(location=constraints["destination"] or "", sort_by=sort_by)
+    results = await search_attractions(location=to_city_name(constraints["destination"] or ""), sort_by=sort_by)
     return _candidates_to_reply(results, assumptions=["Half-day sightseeing pace assumed unless specified"])
 
 

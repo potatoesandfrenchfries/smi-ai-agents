@@ -228,7 +228,8 @@ async def _fetch_restaurants(location: str, cuisine: str | None) -> list[dict[st
             f'node["amenity"="restaurant"]{cuisine_filter}(area.a);'
             f'out body 10;'
         )
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        # Overpass/OSM infra rejects requests with no (or a generic) User-Agent.
+        async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Smartinerary/0.1"}) as client:
             response = await client.post(
                 "https://overpass-api.de/api/interpreter",
                 data={"data": query},

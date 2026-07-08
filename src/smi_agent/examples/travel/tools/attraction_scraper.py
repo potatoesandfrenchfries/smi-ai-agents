@@ -1,14 +1,18 @@
 """Attraction search tool — scrapes/queries for tourist attractions and experiences.
 
-Prototype implementation: seeded mock data only (no free public attraction API
-with broad city coverage exists at prototype scope — see hotel/restaurant
-scrapers for the HTTP-first + mock-fallback pattern this would follow in
-production).
+Prototype implementation: attempts a real Overpass API query (OpenStreetMap
+data, no key required — same source restaurant_scraper.py uses), falls back
+to seeded mock data on any failure.
+
+Entry fees are deliberately NOT sourced here — OSM's tourism tags don't carry
+structured pricing, so entry_fee_gbp comes back None for live results. That's
+left for a dedicated pricing specialist to fill in per-recommendation later;
+this tool's job is discovery (name, category, location), not pricing.
 
 Sort options:
-    rating     — highest-rated first
-    price      — cheapest entry fee first (free attractions first)
-    proximity  — closest to city centre first
+    rating     — highest-rated first (mock data only; live data has no rating)
+    price      — cheapest entry fee first (unpriced results sort last)
+    proximity  — closest to city centre first (unpriced results sort last)
 """
 
 from __future__ import annotations
@@ -152,6 +156,11 @@ def _seeded_attractions(location: str) -> list[dict[str, Any]]:
     return results
 
 
+_OSM_TOURISM_VALUES = (
+    "attraction", "museum", "viewpoint", "gallery", "artwork", "zoo", "theme_park"
+)
+
+
 async def search_attractions(
     location: str,
     sort_by: str = "rating",
@@ -159,7 +168,8 @@ async def search_attractions(
 ) -> list[dict[str, Any]]:
     """Search for tourist attractions and experiences near a location.
 
-    Prototype: seeded mock data only (see module docstring).
+    Prototype: tries the Overpass API (OSM data) first; falls back to mock
+    data on any failure (see module docstring re: entry fees).
 
     Args:
         location:    City, area, or landmark (e.g. "Paris", "Edinburgh").
@@ -171,18 +181,81 @@ async def search_attractions(
         entry_fee_gbp, duration_hours, distance_from_centre_km, tags,
         recommended_time_of_day, highlight.
     """
-    attractions = _seeded_attractions(location)
+    attractions = await _fetch_attractions(location)
     attractions = _sort(attractions, sort_by)
     return attractions[:num_results]
 
 
+async def _fetch_attractions(location: str) -> list[dict[str, Any]]:
+    """Attempt Overpass API query; fall back to mock data on any failure."""
+    try:
+        import httpx
+
+        tourism_filter = "|".join(_OSM_TOURISM_VALUES)
+        query = (
+            f'[out:json][timeout:10];'
+            f'area[name="{location}"]->.a;'
+            f'node["tourism"~"{tourism_filter}"](area.a);'
+            f'out body 10;'
+        )
+        # Overpass/OSM infra rejects requests with no (or a generic) User-Agent.
+        async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Smartinerary/0.1"}) as client:
+            response = await client.post(
+                "https://overpass-api.de/api/interpreter",
+                data={"data": query},
+            )
+            if response.status_code == 200:
+                elements = response.json().get("elements", [])
+                if elements:
+                    return _normalise_overpass(elements, location)
+    except Exception as exc:
+        logger.debug("Attraction HTTP fetch failed (%s) — using mock data", exc)
+
+    return _seeded_attractions(location)
+
+
+def _normalise_overpass(elements: list[dict], location: str) -> list[dict[str, Any]]:
+    """Map Overpass/OSM fields to our internal attraction schema.
+
+    OSM carries no rating, review count, distance-from-centre, or pricing for
+    these tags — those come back None. Entry fees are intentionally left for
+    a separate pricing specialist to fill in per-recommendation (see module
+    docstring); everything else here is real discovery data.
+    """
+    results = []
+    for i, el in enumerate(elements):
+        tags = el.get("tags", {})
+        tourism_value = tags.get("tourism", "attraction")
+        results.append({
+            "id": f"OSM-{el.get('id', i)}",
+            "name": tags.get("name", "Unnamed Attraction"),
+            "category": tourism_value.replace("_", " ").title(),
+            "location": location,
+            "rating": None,
+            "review_count": None,
+            "entry_fee_gbp": None,
+            "duration_hours": None,
+            "distance_from_centre_km": None,
+            "tags": [tourism_value],
+            "recommended_time_of_day": None,
+            "highlight": tags.get("description", ""),
+        })
+    return results
+
+
 def _sort(attractions: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
     if sort_by == "rating":
-        return sorted(attractions, key=lambda a: a["rating"], reverse=True)
+        return sorted(attractions, key=lambda a: a.get("rating") or 0, reverse=True)
     if sort_by == "price":
-        return sorted(attractions, key=lambda a: a["entry_fee_gbp"])
+        return sorted(
+            attractions,
+            key=lambda a: a["entry_fee_gbp"] if a.get("entry_fee_gbp") is not None else float("inf"),
+        )
     if sort_by == "proximity":
-        return sorted(attractions, key=lambda a: a["distance_from_centre_km"])
+        return sorted(
+            attractions,
+            key=lambda a: a["distance_from_centre_km"] if a.get("distance_from_centre_km") is not None else float("inf"),
+        )
     return attractions
 
 

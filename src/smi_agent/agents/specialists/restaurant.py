@@ -33,7 +33,7 @@ class RestaurantSpecialist(BaseSpecialist):
         context: dict[str, Any],
         step_emitter: StepEmitter,
     ) -> StructuredResponse:
-        from smi_agent.examples.travel.tools.restaurant_scraper import search_restaurants
+        from smi_agent.providers.registry import get_restaurant_provider
 
         location = context.get("location", "")
         cuisine = context.get("cuisine")
@@ -51,13 +51,13 @@ class RestaurantSpecialist(BaseSpecialist):
         )
 
         try:
-            restaurants = await search_restaurants(
+            restaurants = await get_restaurant_provider().search(
                 location=location,
                 cuisine=cuisine,
                 sort_by=sort_by,
             )
         except Exception as exc:
-            logger.exception("RestaurantSpecialist: search_restaurants failed")
+            logger.exception("RestaurantSpecialist: restaurant provider search failed")
             await step_emitter.emit("restaurant_search", "failed", str(exc))
             return StructuredResponse(
                 agent=self.name,

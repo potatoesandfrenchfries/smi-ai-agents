@@ -117,12 +117,12 @@ class PersistTripParams:
 @activity.defn
 async def flight_search_activity(params: FlightSearchParams) -> list[dict]:
     """Search for available flights. Retried by Temporal on failure."""
-    from smi_agent.examples.travel.tools.flight_scraper import search_flights
+    from smi_agent.providers.registry import get_flight_provider
 
     activity.logger.info(
         "Searching flights %s → %s on %s", params.origin, params.destination, params.date
     )
-    results = await search_flights(
+    results = await get_flight_provider().search(
         origin=params.origin,
         destination=params.destination,
         date=params.date,
@@ -136,12 +136,12 @@ async def flight_search_activity(params: FlightSearchParams) -> list[dict]:
 @activity.defn
 async def hotel_search_activity(params: HotelSearchParams) -> list[dict]:
     """Search for available hotels. Retried by Temporal on failure."""
-    from smi_agent.examples.travel.tools.hotel_scraper import search_hotels
+    from smi_agent.providers.registry import get_hotel_provider
 
     activity.logger.info(
         "Searching hotels in %s (%s to %s)", params.location, params.check_in, params.check_out
     )
-    results = await search_hotels(
+    results = await get_hotel_provider().search(
         location=params.location,
         check_in=params.check_in,
         check_out=params.check_out,
@@ -155,10 +155,10 @@ async def hotel_search_activity(params: HotelSearchParams) -> list[dict]:
 @activity.defn
 async def restaurant_search_activity(params: RestaurantSearchParams) -> list[dict]:
     """Search for restaurants. Retried by Temporal on failure."""
-    from smi_agent.examples.travel.tools.restaurant_scraper import search_restaurants
+    from smi_agent.providers.registry import get_restaurant_provider
 
     activity.logger.info("Searching restaurants in %s", params.location)
-    results = await search_restaurants(
+    results = await get_restaurant_provider().search(
         location=params.location,
         cuisine=params.cuisine,
         sort_by=params.sort_by,

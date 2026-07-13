@@ -33,7 +33,7 @@ class HotelSpecialist(BaseSpecialist):
         context: dict[str, Any],
         step_emitter: StepEmitter,
     ) -> StructuredResponse:
-        from smi_agent.examples.travel.tools.hotel_scraper import search_hotels
+        from smi_agent.providers.registry import get_hotel_provider
 
         location = context.get("location", "")
         check_in = context.get("check_in", "")
@@ -50,14 +50,14 @@ class HotelSpecialist(BaseSpecialist):
         )
 
         try:
-            hotels = await search_hotels(
+            hotels = await get_hotel_provider().search(
                 location=location,
                 check_in=check_in,
                 check_out=check_out,
                 sort_by=sort_by,
             )
         except Exception as exc:
-            logger.exception("HotelSpecialist: search_hotels failed")
+            logger.exception("HotelSpecialist: hotel provider search failed")
             await step_emitter.emit("hotel_search", "failed", str(exc))
             return StructuredResponse(
                 agent=self.name,

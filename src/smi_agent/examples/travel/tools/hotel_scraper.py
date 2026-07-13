@@ -147,6 +147,19 @@ async def search_hotels(
     return hotels[:num_results]
 
 
+async def search_hotels_mock(
+    location: str,
+    check_in: str,
+    check_out: str,
+    sort_by: str = "rating",
+    num_results: int = 5,
+) -> list[dict[str, Any]]:
+    """Deterministic seeded results only — no network, no cache. For offline/test providers."""
+    hotels = _seeded_hotels(location, check_in, check_out)
+    hotels = _sort(hotels, sort_by)
+    return hotels[:num_results]
+
+
 _OSM_TOURISM_VALUES = ("hotel", "guest_house", "hostel", "motel")
 
 

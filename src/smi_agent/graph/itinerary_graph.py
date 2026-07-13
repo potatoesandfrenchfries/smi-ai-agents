@@ -508,10 +508,10 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
 async def _run_flight(
     task: TaskRequest, constraints: TripConstraints, sort_override: str | None = None,
 ) -> TaskReply:
-    from smi_agent.examples.travel.tools.flight_scraper import search_flights
     from smi_agent.examples.travel.tools.location_resolver import to_iata
+    from smi_agent.providers.registry import get_flight_provider
     sort_by = sort_override or constraints.get("sort_preference", "cost")
-    results = await search_flights(
+    results = await get_flight_provider().search(
         origin=to_iata(constraints["origin"] or ""),
         destination=to_iata(constraints["destination"] or ""),
         date=constraints["check_in"] or "",
@@ -529,10 +529,10 @@ async def _run_hotel(
     sort_override: str | None = None,
     business_only: bool = False,
 ) -> TaskReply:
-    from smi_agent.examples.travel.tools.hotel_scraper import search_hotels
     from smi_agent.examples.travel.tools.location_resolver import to_city_name
+    from smi_agent.providers.registry import get_hotel_provider
     sort_by = sort_override or ("rating" if constraints.get("sort_preference") == "comfort" else "price")
-    results = await search_hotels(
+    results = await get_hotel_provider().search(
         location=to_city_name(constraints["destination"] or ""),
         check_in=constraints["check_in"] or "",
         check_out=constraints["check_out"] or "",
@@ -552,9 +552,9 @@ async def _run_hotel(
 async def _run_restaurant(
     task: TaskRequest, constraints: TripConstraints, business_only: bool = False,
 ) -> TaskReply:
-    from smi_agent.examples.travel.tools.restaurant_scraper import search_restaurants
     from smi_agent.examples.travel.tools.location_resolver import to_city_name
-    results = await search_restaurants(location=to_city_name(constraints["destination"] or ""))
+    from smi_agent.providers.registry import get_restaurant_provider
+    results = await get_restaurant_provider().search(location=to_city_name(constraints["destination"] or ""))
     assumptions = ["Dinner assumed if meal type not specified"]
     if business_only:
         filtered = [r for r in results if r.get("business_friendly")]

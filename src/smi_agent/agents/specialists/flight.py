@@ -1,8 +1,10 @@
 """FlightSpecialist — searches for flights and returns ranked options.
 
-Implements BaseSpecialist directly so the agent's run() method can call
-the flight_scraper tool in Python rather than routing through the ToolRegistry.
-This makes the data flow explicit and easy to follow for learning purposes.
+Implements BaseSpecialist directly so the agent's run() method calls the
+flight provider in Python rather than routing through the ToolRegistry. This
+makes the data flow explicit and easy to follow for learning purposes. The
+provider registry (not a concrete scraper) is the only thing this agent
+depends on, so a new flight data source needs no change here.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ class FlightSpecialist(BaseSpecialist):
         context: dict[str, Any],
         step_emitter: StepEmitter,
     ) -> StructuredResponse:
-        from smi_agent.examples.travel.tools.flight_scraper import search_flights
+        from smi_agent.providers.registry import get_flight_provider
 
         # ── 1. Parse parameters from context (set by the Planner or API layer) ──
         origin = context.get("origin", "")
@@ -60,14 +62,14 @@ class FlightSpecialist(BaseSpecialist):
 
         # ── 2. Call the scraper tool ──────────────────────────────────────────
         try:
-            flights = await search_flights(
+            flights = await get_flight_provider().search(
                 origin=origin,
                 destination=destination,
                 date=date,
                 sort_by=sort_by,
             )
         except Exception as exc:
-            logger.exception("FlightSpecialist: search_flights failed")
+            logger.exception("FlightSpecialist: flight provider search failed")
             await step_emitter.emit("flight_search", "failed", str(exc))
             return StructuredResponse(
                 agent=self.name,

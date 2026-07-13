@@ -222,6 +222,18 @@ async def search_restaurants(
     return restaurants[:num_results]
 
 
+async def search_restaurants_mock(
+    location: str,
+    cuisine: str | None = None,
+    sort_by: str = "rating",
+    num_results: int = 5,
+) -> list[dict[str, Any]]:
+    """Deterministic seeded results only — no network, no cache. For offline/test providers."""
+    restaurants = _seeded_restaurants(location, cuisine)
+    restaurants = _sort(restaurants, sort_by, cuisine)
+    return restaurants[:num_results]
+
+
 async def _fetch_restaurants(location: str, cuisine: str | None) -> list[dict[str, Any]]:
     """Cached wrapper around the live fetch — reused across identical location+cuisine searches."""
     key = restaurant_cache_key(fingerprint(location.lower(), (cuisine or "").lower()))

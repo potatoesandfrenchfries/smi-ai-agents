@@ -158,6 +158,19 @@ async def search_flights(
     return flights[:num_results]
 
 
+async def search_flights_mock(
+    origin: str,
+    destination: str,
+    date: str,
+    sort_by: str = "cost",
+    num_results: int = 5,
+) -> list[dict[str, Any]]:
+    """Deterministic seeded results only — no network, no cache. For offline/test providers."""
+    flights = _seeded_flights(origin, destination, date)
+    flights = _sort(flights, sort_by)
+    return flights[:num_results]
+
+
 async def _fetch_flights(origin: str, destination: str, date: str) -> list[dict[str, Any]]:
     """Cached wrapper around the live fetch — reused across identical route+date searches."""
     key = flight_cache_key(fingerprint(origin.lower(), destination.lower(), date))

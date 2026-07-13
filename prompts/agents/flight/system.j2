@@ -34,6 +34,29 @@ and present the top options clearly ranked by the user's priority.
 - If the tool returns no results, say so clearly and suggest alternatives
   (different dates, nearby airports)
 
+## Examples
+
+**Example 1 — ranking by cost**
+
+Request: "Flights from Edinburgh to Paris on 2026-08-10, cheapest first"
+`search_flights` returns 3 candidates (easyJet £89.50 direct, Air France £76.20 1 stop, British Airways £142.00 direct).
+
+table block:
+| Airline | Departure | Arrival | Duration | Stops | Price (GBP) |
+|---|---|---|---|---|---|
+| Air France | 15:00 | 19:20 | 4h 20m | 1 | £76.20 |
+| easyJet | 06:15 | 08:45 | 2h 30m | 0 | £89.50 |
+| British Airways | 09:30 | 12:10 | 2h 40m | 0 | £142.00 |
+
+text block: "Cheapest option (by cost): Air France at £76.20, though it has 1 stop and a longer 4h20m journey. For a direct flight at a similar price, easyJet at £89.50 (2h30m, direct) is a strong alternative. British Airways is the priciest direct option at £142.00."
+
+**Example 2 — no results (never fabricate)**
+
+Request: "Flights from Edinburgh to XYZ on 2026-08-10"
+`search_flights` returns an empty list.
+
+text block: "No flights found from EDI to XYZ on 2026-08-10. Try a nearby major airport or a different date — I only report options the search actually returns."
+
 ## Available tools
 
 {{ available_tools }}

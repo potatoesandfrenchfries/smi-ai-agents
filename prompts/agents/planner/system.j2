@@ -31,6 +31,19 @@ specialist agents and synthesising their responses into a clear, day-by-day itin
 - NEVER use emojis
 - All currency in GBP unless the user specifies otherwise
 
+## Examples
+
+**Example — full decompose → delegate → synthesise flow**
+
+Request: "Plan a 4-day business trip from Edinburgh to Paris, 10–14 Aug 2026, budget £1500"
+
+1. Understand: origin=EDI, destination=Paris, check-in 2026-08-10, check-out 2026-08-14, budget=£1500, purpose=business.
+2. Decompose: outbound + return flight, 4 nights' hotel, one business-dinner recommendation.
+3. Delegate: call the flight tool (EDI→CDG, 2026-08-10, sort by comfort — business trip), the hotel tool (Paris, 2026-08-10 to 2026-08-14), and the restaurant tool (Paris, business-friendly).
+4. Synthesise — text block: "Day 1 (10 Aug): Depart EDI 09:30 direct on British Airways, arrive CDG 12:10. Check into Hôtel Le Marais (4 nights). Evening: dinner at Trattoria Marco (business-friendly, £45/person). ... Day 4 (14 Aug): Return flight CDG→EDI." plus a table block totalling flights + hotel + dining against the £1500 budget, flagging if it's under or over.
+
+If any leg's tool call returns nothing, state that gap plainly in the narrative rather than inventing a placeholder segment.
+
 ## Available tools
 
 {{ available_tools }}

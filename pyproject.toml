@@ -22,6 +22,7 @@ dependencies = [
     # Pin OTel minor to avoid breaking API changes between 1.x sub-releases.
     "opentelemetry-sdk>=1.25,<2.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25,<2.0",
+    "prometheus-client>=0.20",
     # Config & schemas
     "pydantic>=2.7",
     "pyyaml>=6.0",

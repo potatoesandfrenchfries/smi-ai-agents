@@ -117,55 +117,61 @@ class PersistTripParams:
 @activity.defn
 async def flight_search_activity(params: FlightSearchParams) -> list[dict]:
     """Search for available flights. Retried by Temporal on failure."""
+    from smi_agent.observability.metrics import track_agent_execution
     from smi_agent.providers.registry import get_flight_provider
 
-    activity.logger.info(
-        "Searching flights %s → %s on %s", params.origin, params.destination, params.date
-    )
-    results = await get_flight_provider().search(
-        origin=params.origin,
-        destination=params.destination,
-        date=params.date,
-        sort_by=params.sort_by,
-        num_results=params.num_results,
-    )
-    activity.logger.info("Flight search returned %d results", len(results))
-    return results
+    with track_agent_execution("flight_search"):
+        activity.logger.info(
+            "Searching flights %s → %s on %s", params.origin, params.destination, params.date
+        )
+        results = await get_flight_provider().search(
+            origin=params.origin,
+            destination=params.destination,
+            date=params.date,
+            sort_by=params.sort_by,
+            num_results=params.num_results,
+        )
+        activity.logger.info("Flight search returned %d results", len(results))
+        return results
 
 
 @activity.defn
 async def hotel_search_activity(params: HotelSearchParams) -> list[dict]:
     """Search for available hotels. Retried by Temporal on failure."""
+    from smi_agent.observability.metrics import track_agent_execution
     from smi_agent.providers.registry import get_hotel_provider
 
-    activity.logger.info(
-        "Searching hotels in %s (%s to %s)", params.location, params.check_in, params.check_out
-    )
-    results = await get_hotel_provider().search(
-        location=params.location,
-        check_in=params.check_in,
-        check_out=params.check_out,
-        sort_by=params.sort_by,
-        num_results=params.num_results,
-    )
-    activity.logger.info("Hotel search returned %d results", len(results))
-    return results
+    with track_agent_execution("hotel_search"):
+        activity.logger.info(
+            "Searching hotels in %s (%s to %s)", params.location, params.check_in, params.check_out
+        )
+        results = await get_hotel_provider().search(
+            location=params.location,
+            check_in=params.check_in,
+            check_out=params.check_out,
+            sort_by=params.sort_by,
+            num_results=params.num_results,
+        )
+        activity.logger.info("Hotel search returned %d results", len(results))
+        return results
 
 
 @activity.defn
 async def restaurant_search_activity(params: RestaurantSearchParams) -> list[dict]:
     """Search for restaurants. Retried by Temporal on failure."""
+    from smi_agent.observability.metrics import track_agent_execution
     from smi_agent.providers.registry import get_restaurant_provider
 
-    activity.logger.info("Searching restaurants in %s", params.location)
-    results = await get_restaurant_provider().search(
-        location=params.location,
-        cuisine=params.cuisine,
-        sort_by=params.sort_by,
-        num_results=params.num_results,
-    )
-    activity.logger.info("Restaurant search returned %d results", len(results))
-    return results
+    with track_agent_execution("restaurant_search"):
+        activity.logger.info("Searching restaurants in %s", params.location)
+        results = await get_restaurant_provider().search(
+            location=params.location,
+            cuisine=params.cuisine,
+            sort_by=params.sort_by,
+            num_results=params.num_results,
+        )
+        activity.logger.info("Restaurant search returned %d results", len(results))
+        return results
 
 
 @activity.defn
@@ -177,15 +183,17 @@ async def attraction_search_activity(params: AttractionSearchParams) -> list[dic
     business/leisure classification the graph makes downstream.
     """
     from smi_agent.examples.travel.tools.attraction_scraper import search_attractions
+    from smi_agent.observability.metrics import track_agent_execution
 
-    activity.logger.info("Searching attractions in %s", params.location)
-    results = await search_attractions(
-        location=params.location,
-        sort_by=params.sort_by,
-        num_results=params.num_results,
-    )
-    activity.logger.info("Attraction search returned %d results", len(results))
-    return results
+    with track_agent_execution("attraction_search"):
+        activity.logger.info("Searching attractions in %s", params.location)
+        results = await search_attractions(
+            location=params.location,
+            sort_by=params.sort_by,
+            num_results=params.num_results,
+        )
+        activity.logger.info("Attraction search returned %d results", len(results))
+        return results
 
 
 @activity.defn
@@ -198,6 +206,13 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
     isn't silently discarded (FR-ORC-3 — no redundant re-fetch of what's
     already known).
     """
+    from smi_agent.observability.metrics import track_agent_execution
+
+    with track_agent_execution("itinerary_generation"):
+        return await _generate_itinerary(params)
+
+
+async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
     import uuid
     from smi_agent.graph.itinerary_graph import build_itinerary_graph
     from smi_agent.graph.state import TaskReply
@@ -303,24 +318,45 @@ async def persist_trip_activity(params: PersistTripParams) -> None:
     swapping the store instantiated here, not touching the workflow that
     calls this activity.
     """
+    from smi_agent.observability.metrics import track_agent_execution
     from smi_agent.trip_store import FileTripStore, TripRecord
 
-    record = TripRecord(
-        trip_id=params.trip_id,
-        user_id=params.user_id,
-        tenant_id=params.tenant_id,
-        status=params.status,
-        origin=params.origin,
-        destination=params.destination,
-        check_in=params.check_in,
-        check_out=params.check_out,
-        segments=params.segments,
-        dining_options=params.dining_options,
-        total_cost_gbp=params.total_cost_gbp,
-        policy_status=params.policy_status,
-        assumptions=params.assumptions,
-        errors=params.errors,
-        budget_alternatives=params.budget_alternatives,
-    )
-    await FileTripStore().save_trip(record)
-    activity.logger.info("Persisted trip %s for user %s", params.trip_id, params.user_id)
+    with track_agent_execution("persist_trip"):
+        record = TripRecord(
+            trip_id=params.trip_id,
+            user_id=params.user_id,
+            tenant_id=params.tenant_id,
+            status=params.status,
+            origin=params.origin,
+            destination=params.destination,
+            check_in=params.check_in,
+            check_out=params.check_out,
+            segments=params.segments,
+            dining_options=params.dining_options,
+            total_cost_gbp=params.total_cost_gbp,
+            policy_status=params.policy_status,
+            assumptions=params.assumptions,
+            errors=params.errors,
+            budget_alternatives=params.budget_alternatives,
+        )
+        await FileTripStore().save_trip(record)
+        activity.logger.info("Persisted trip %s for user %s", params.trip_id, params.user_id)
+
+
+@dataclass
+class WorkflowMetricParams:
+    workflow_name: str
+    status: str
+
+
+@activity.defn
+async def record_workflow_metric_activity(params: WorkflowMetricParams) -> None:
+    """Increments the workflow-execution-count metric.
+
+    Must be called as an activity, never directly inside workflow.run() —
+    Temporal replays workflow code from history, which would double-count a
+    plain in-workflow counter.inc() call.
+    """
+    from smi_agent.observability.metrics import WORKFLOW_EXECUTIONS_TOTAL
+
+    WORKFLOW_EXECUTIONS_TOTAL.labels(workflow=params.workflow_name, status=params.status).inc()

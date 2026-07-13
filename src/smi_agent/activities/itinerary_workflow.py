@@ -63,11 +63,13 @@ with workflow.unsafe.imports_passed_through():
         ItineraryResult,
         PersistTripParams,
         RestaurantSearchParams,
+        WorkflowMetricParams,
         attraction_search_activity,
         flight_search_activity,
         hotel_search_activity,
         itinerary_generation_activity,
         persist_trip_activity,
+        record_workflow_metric_activity,
         restaurant_search_activity,
     )
     from smi_agent.examples.travel.tools.location_resolver import to_city_name, to_iata
@@ -194,9 +196,22 @@ class ItineraryWorkflow:
     def edit_log(self) -> list[str]:
         return self._edit_log
 
+    # ── Metrics ──────────────────────────────────────────────────────────────
+    # Recorded via an activity, never inline — Temporal replays workflow code
+    # from history, which would double-count a plain counter.inc() call here.
+
+    async def _record_metric(self, status: str) -> None:
+        await workflow.execute_activity(
+            record_workflow_metric_activity,
+            WorkflowMetricParams(workflow_name="ItineraryWorkflow", status=status),
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=_default_retry(),
+        )
+
     @workflow.run
     async def run(self, input: ItineraryWorkflowInput) -> ItineraryWorkflowResult:
         workflow.logger.info("Starting itinerary workflow for plan %s", input.plan_id)
+        await self._record_metric("started")
 
         # ── Step 1: Fan out to all four search activities in parallel ───────────
         # All four run concurrently. Total latency = slowest activity, not sum.
@@ -311,6 +326,7 @@ class ItineraryWorkflow:
             )
         except Exception as exc:
             workflow.logger.error("itinerary_generation_activity failed after retries: %s", exc)
+            await self._record_metric("error")
             return ItineraryWorkflowResult(
                 plan_id=input.plan_id,
                 status="error",
@@ -342,6 +358,7 @@ class ItineraryWorkflow:
                 )
             except TimeoutError:
                 workflow.logger.warning("Review window elapsed with no traveler response")
+                await self._record_metric("review_timed_out")
                 return ItineraryWorkflowResult(
                     plan_id=input.plan_id,
                     status="review_timed_out",
@@ -353,6 +370,7 @@ class ItineraryWorkflow:
 
             if self._rejected:
                 workflow.logger.info("Itinerary rejected by traveler")
+                await self._record_metric("rejected")
                 return ItineraryWorkflowResult(plan_id=input.plan_id, status="rejected", errors=errors)
 
             if self._pending_edit is not None:
@@ -407,6 +425,8 @@ class ItineraryWorkflow:
             errors=errors + self._itinerary.errors,
             budget_alternatives=self._itinerary.budget_alternatives,
         )
+
+        await self._record_metric("confirmed")
 
         # Persist so this trip can be looked up from a later, unrelated
         # conversation (e.g. a NYC trip started after this Japan one) —

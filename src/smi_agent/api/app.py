@@ -6,12 +6,20 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from smi_agent.observability.metrics import (
+    API_REQUESTS_TOTAL,
+    ERRORS_TOTAL,
+    HTTP_REQUEST_DURATION_SECONDS,
+)
 
 from smi_agent.api.conversation_runner import restore_session_from_postgres, run_conversation_turn
 from smi_agent.api.conversation_service import (
@@ -190,6 +198,42 @@ def _configure_domain(module_path: str) -> None:
 
 
 app = FastAPI(title="SMI Agent Conversation API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _metrics_middleware(request: Request, call_next):
+    """Records API request count, latency, and 5xx/exception error count.
+
+    Uses the matched route template (e.g. "/api/v1/conversations/{conversation_id}")
+    rather than the raw path, so per-conversation UUIDs don't blow up label
+    cardinality.
+    """
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        ERRORS_TOTAL.labels(component="api").inc()
+        raise
+
+    route = request.scope.get("route")
+    path = route.path if route is not None else request.url.path
+    API_REQUESTS_TOTAL.labels(method=request.method, path=path, status=str(response.status_code)).inc()
+    HTTP_REQUEST_DURATION_SECONDS.labels(method=request.method, path=path).observe(
+        time.perf_counter() - start
+    )
+    if response.status_code >= 500:
+        ERRORS_TOTAL.labels(component="api").inc()
+    return response
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    """Prometheus scrape endpoint for this process (API request count/latency/errors).
+
+    Workflow/agent execution metrics live in the separate Temporal worker
+    process — see worker.py's SMI_WORKER_METRICS_PORT.
+    """
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 def _get_or_build_graph(app: FastAPI, agent_name: str) -> Any:

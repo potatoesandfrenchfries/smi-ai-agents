@@ -16,7 +16,14 @@ import logging
 import random
 from typing import Any
 
+from smi_agent.cache.redis_cache import fingerprint, get_or_set
+from smi_agent.config.redis_keys import restaurant_cache_key
+
 logger = logging.getLogger(__name__)
+
+# Restaurant listings barely change day to day — the longest TTL of the
+# three search caches.
+_CACHE_TTL_SECONDS = 3600
 
 CUISINES = [
     "Italian", "French", "Japanese", "Indian", "Thai", "Mexican",
@@ -216,6 +223,14 @@ async def search_restaurants(
 
 
 async def _fetch_restaurants(location: str, cuisine: str | None) -> list[dict[str, Any]]:
+    """Cached wrapper around the live fetch — reused across identical location+cuisine searches."""
+    key = restaurant_cache_key(fingerprint(location.lower(), (cuisine or "").lower()))
+    return await get_or_set(
+        key, _CACHE_TTL_SECONDS, lambda: _fetch_restaurants_live(location, cuisine)
+    )
+
+
+async def _fetch_restaurants_live(location: str, cuisine: str | None) -> list[dict[str, Any]]:
     """Attempt Overpass API query; fall back to mock data on any failure."""
     try:
         import httpx

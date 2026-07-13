@@ -17,7 +17,15 @@ import logging
 import random
 from typing import Any
 
+from smi_agent.cache.redis_cache import fingerprint, get_or_set
+from smi_agent.config.redis_keys import flight_cache_key
+
 logger = logging.getLogger(__name__)
+
+# Fares/availability shift fast enough that a long TTL would go stale, but
+# repeated searches for the same route+date within a short window (a user
+# comparing options, an agent retrying) are common enough to be worth caching.
+_CACHE_TTL_SECONDS = 300
 
 # ---------------------------------------------------------------------------
 # Data shapes
@@ -151,6 +159,14 @@ async def search_flights(
 
 
 async def _fetch_flights(origin: str, destination: str, date: str) -> list[dict[str, Any]]:
+    """Cached wrapper around the live fetch — reused across identical route+date searches."""
+    key = flight_cache_key(fingerprint(origin.lower(), destination.lower(), date))
+    return await get_or_set(
+        key, _CACHE_TTL_SECONDS, lambda: _fetch_flights_live(origin, destination, date)
+    )
+
+
+async def _fetch_flights_live(origin: str, destination: str, date: str) -> list[dict[str, Any]]:
     """Attempt real HTTP fetch; fall back to mock data on any failure."""
     try:
         import httpx  # optional dep — in 'conversation' extra

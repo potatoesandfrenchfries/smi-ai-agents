@@ -23,7 +23,14 @@ import logging
 import random
 from typing import Any
 
+from smi_agent.cache.redis_cache import fingerprint, get_or_set
+from smi_agent.config.redis_keys import hotel_cache_key
+
 logger = logging.getLogger(__name__)
+
+# Hotel listings/stars change far less often than flight fares — a longer
+# TTL is safe and cuts repeat Overpass queries for the same stay.
+_CACHE_TTL_SECONDS = 1800
 
 HOTEL_NAMES = [
     # Generic / European
@@ -144,6 +151,14 @@ _OSM_TOURISM_VALUES = ("hotel", "guest_house", "hostel", "motel")
 
 
 async def _fetch_hotels(location: str, check_in: str, check_out: str) -> list[dict[str, Any]]:
+    """Cached wrapper around the live fetch — reused across identical location+stay searches."""
+    key = hotel_cache_key(fingerprint(location.lower(), check_in, check_out))
+    return await get_or_set(
+        key, _CACHE_TTL_SECONDS, lambda: _fetch_hotels_live(location, check_in, check_out)
+    )
+
+
+async def _fetch_hotels_live(location: str, check_in: str, check_out: str) -> list[dict[str, Any]]:
     """Attempt Overpass API query; fall back to mock data on any failure.
 
     Node-only (no way/relation geometries) — testing showed way-tagged

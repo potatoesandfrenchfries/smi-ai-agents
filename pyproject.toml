@@ -30,6 +30,8 @@ dependencies = [
     "asyncpg>=0.29",
     "sqlalchemy[asyncio]>=2.0",
     "alembic>=1.13",
+    # Caching (flight/hotel/restaurant search results) + conversation session store
+    "redis[asyncio]>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +44,6 @@ dev = [
 conversation = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
-    "redis[asyncio]>=5.0",
     "stomp-py>=8.0",
     "httpx>=0.27",
 ]

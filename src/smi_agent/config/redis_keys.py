@@ -46,6 +46,21 @@ def user_context_key(user_id: str) -> str:
     return f"{_PREFIX}smi:user:{user_id}"
 
 
+def flight_cache_key(fingerprint: str) -> str:
+    """Redis key for a cached flight search result."""
+    return f"{_PREFIX}smi:cache:flight:{fingerprint}"
+
+
+def hotel_cache_key(fingerprint: str) -> str:
+    """Redis key for a cached hotel search result."""
+    return f"{_PREFIX}smi:cache:hotel:{fingerprint}"
+
+
+def restaurant_cache_key(fingerprint: str) -> str:
+    """Redis key for a cached restaurant search result."""
+    return f"{_PREFIX}smi:cache:restaurant:{fingerprint}"
+
+
 def get_env() -> str:
     """Return the current environment name."""
     return _ENV

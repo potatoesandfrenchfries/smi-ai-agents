@@ -93,6 +93,25 @@ class ItineraryResult:
     resolved_constraints: dict = field(default_factory=dict)  # What parse_intent resolved — carried forward for HITL edits
 
 
+@dataclass
+class PersistTripParams:
+    trip_id: str
+    user_id: str
+    tenant_id: str
+    status: str
+    origin: str
+    destination: str
+    check_in: str
+    check_out: str
+    segments: list[dict] = field(default_factory=list)
+    dining_options: list[dict] = field(default_factory=list)
+    total_cost_gbp: float | None = None
+    policy_status: str = "pending"
+    assumptions: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    budget_alternatives: list[dict] = field(default_factory=list)
+
+
 # ── Activities ────────────────────────────────────────────────────────────────
 
 @activity.defn
@@ -274,3 +293,34 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
         budget_alternatives=result.get("budget_alternatives") or [],
         resolved_constraints=result.get("constraints") or {},
     )
+
+
+@activity.defn
+async def persist_trip_activity(params: PersistTripParams) -> None:
+    """Persist a confirmed trip so it can be looked up from a later, unrelated conversation.
+
+    File-backed via FileTripStore today; moving to Postgres later means
+    swapping the store instantiated here, not touching the workflow that
+    calls this activity.
+    """
+    from smi_agent.trip_store import FileTripStore, TripRecord
+
+    record = TripRecord(
+        trip_id=params.trip_id,
+        user_id=params.user_id,
+        tenant_id=params.tenant_id,
+        status=params.status,
+        origin=params.origin,
+        destination=params.destination,
+        check_in=params.check_in,
+        check_out=params.check_out,
+        segments=params.segments,
+        dining_options=params.dining_options,
+        total_cost_gbp=params.total_cost_gbp,
+        policy_status=params.policy_status,
+        assumptions=params.assumptions,
+        errors=params.errors,
+        budget_alternatives=params.budget_alternatives,
+    )
+    await FileTripStore().save_trip(record)
+    activity.logger.info("Persisted trip %s for user %s", params.trip_id, params.user_id)

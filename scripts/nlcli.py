@@ -33,6 +33,8 @@ async def main() -> None:
             break
         print("  Please enter a trip description.")
 
+    user_id = input("User ID [user-demo]: ").strip() or "user-demo"
+
     # ── Run parse_intent to extract structured fields ─────────────────────────
     plan_id = str(uuid.uuid4())
     dummy_state: ItineraryState = {
@@ -105,6 +107,7 @@ async def main() -> None:
         ItineraryWorkflowInput(
             plan_id=plan_id,
             tenant_id="tenant-demo",
+            user_id=user_id,
             raw_goal=goal,
             origin=constraints.get("origin", ""),
             destination=constraints.get("destination", ""),

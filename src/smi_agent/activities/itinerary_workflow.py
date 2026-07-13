@@ -61,11 +61,13 @@ with workflow.unsafe.imports_passed_through():
         HotelSearchParams,
         ItineraryParams,
         ItineraryResult,
+        PersistTripParams,
         RestaurantSearchParams,
         attraction_search_activity,
         flight_search_activity,
         hotel_search_activity,
         itinerary_generation_activity,
+        persist_trip_activity,
         restaurant_search_activity,
     )
     from smi_agent.examples.travel.tools.location_resolver import to_city_name, to_iata
@@ -77,6 +79,7 @@ with workflow.unsafe.imports_passed_through():
 class ItineraryWorkflowInput:
     plan_id: str
     tenant_id: str
+    user_id: str
     raw_goal: str
     origin: str
     destination: str
@@ -134,6 +137,7 @@ class ItineraryWorkflow:
             ItineraryWorkflowInput(
                 plan_id="plan-001",
                 tenant_id="tenant-abc",
+                user_id="user-123",
                 raw_goal="Fly from EDI to CDG, 10-14 Aug, budget £2000",
                 origin="EDI",
                 destination="CDG",
@@ -392,7 +396,7 @@ class ItineraryWorkflow:
                 break
 
         workflow.logger.info("Itinerary confirmed by traveler")
-        return ItineraryWorkflowResult(
+        final_result = ItineraryWorkflowResult(
             plan_id=input.plan_id,
             status="confirmed",
             segments=self._itinerary.segments,
@@ -403,6 +407,34 @@ class ItineraryWorkflow:
             errors=errors + self._itinerary.errors,
             budget_alternatives=self._itinerary.budget_alternatives,
         )
+
+        # Persist so this trip can be looked up from a later, unrelated
+        # conversation (e.g. a NYC trip started after this Japan one) —
+        # file-backed for now, Postgres-backed later, via PersistTripParams.
+        await workflow.execute_activity(
+            persist_trip_activity,
+            PersistTripParams(
+                trip_id=input.plan_id,
+                user_id=input.user_id,
+                tenant_id=input.tenant_id,
+                status=final_result.status,
+                origin=input.origin,
+                destination=destination_city,
+                check_in=input.check_in,
+                check_out=input.check_out,
+                segments=final_result.segments,
+                dining_options=final_result.dining_options,
+                total_cost_gbp=final_result.total_cost_gbp,
+                policy_status=final_result.policy_status,
+                assumptions=final_result.assumptions,
+                errors=final_result.errors,
+                budget_alternatives=final_result.budget_alternatives,
+            ),
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=_default_retry(),
+        )
+
+        return final_result
 
 
 # ── Edit application ──────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ from smi_agent.activities.travel_activities import (
     flight_search_activity,
     hotel_search_activity,
     itinerary_generation_activity,
+    persist_trip_activity,
     restaurant_search_activity,
 )
 
@@ -61,6 +62,7 @@ async def _run_worker() -> None:
             restaurant_search_activity,
             attraction_search_activity,
             itinerary_generation_activity,
+            persist_trip_activity,
         ],
     )
 

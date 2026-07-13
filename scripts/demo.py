@@ -20,6 +20,7 @@ async def main() -> None:
     input = ItineraryWorkflowInput(
         plan_id=str(uuid.uuid4()),
         tenant_id="tenant-demo",
+        user_id="user-demo",
         raw_goal="Fly from EDI to CDG 2026-08-10 to 2026-08-14 budget 2000",
         origin="EDI",
         destination="CDG",

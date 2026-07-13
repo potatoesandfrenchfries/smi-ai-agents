@@ -37,6 +37,7 @@ async def main() -> None:
     print("Enter your trip details (press Enter to use defaults):")
     print()
 
+    user_id     = prompt("User ID                        ", "user-demo")
     origin      = prompt("Origin airport or city         ", "EDI")
     destination = prompt("Destination airport or city    ", "CDG")
     check_in    = prompt("Departure date (YYYY-MM-DD)    ", "2026-08-10")
@@ -81,6 +82,7 @@ async def main() -> None:
         ItineraryWorkflowInput(
             plan_id=plan_id,
             tenant_id="tenant-demo",
+            user_id=user_id,
             raw_goal=raw_goal,
             origin=origin,
             destination=destination,

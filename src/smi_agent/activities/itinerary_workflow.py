@@ -102,6 +102,7 @@ class ItineraryWorkflowResult:
     assumptions: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
+    quality_review: dict = field(default_factory=dict)  # reflect_itinerary's critic findings
 
 
 @dataclass
@@ -424,6 +425,7 @@ class ItineraryWorkflow:
             assumptions=self._itinerary.assumptions,
             errors=errors + self._itinerary.errors,
             budget_alternatives=self._itinerary.budget_alternatives,
+            quality_review=self._itinerary.quality_review,
         )
 
         await self._record_metric("confirmed")

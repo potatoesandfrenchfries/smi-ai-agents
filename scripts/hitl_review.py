@@ -57,6 +57,15 @@ def print_itinerary(it) -> None:
             fit = "within budget" if alt.get("within_budget") else "still over budget"
             print(f"  {i}. {alt['label']} — £{alt['total_cost_gbp']:.2f} (saves £{alt['savings_gbp']:.2f}, {fit})")
 
+    quality_review = getattr(it, "quality_review", None)
+    if quality_review and quality_review.get("issues"):
+        print()
+        print("Reviewer notes:")
+        if quality_review.get("notes"):
+            print(f"  {quality_review['notes']}")
+        for issue in quality_review["issues"]:
+            print(f"  - [{issue.get('section', 'overall')}] {issue.get('problem')}")
+
 
 async def wait_for_first_itinerary(handle, timeout_seconds: int = 30):
     """Poll current_itinerary() until the workflow has finished its first

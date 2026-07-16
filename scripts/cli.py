@@ -8,10 +8,11 @@ Usage:
 import asyncio
 import uuid
 
+from hitl_review import run_review_loop, wait_for_first_itinerary
 from temporalio.client import Client
 
 from smi_agent.activities.itinerary_workflow import ItineraryWorkflow, ItineraryWorkflowInput
-from hitl_review import run_review_loop, wait_for_first_itinerary
+from smi_agent.trip_store import InProgressPlan, InProgressPlanStore
 
 
 def prompt(label: str, default: str = "") -> str:
@@ -94,6 +95,16 @@ async def main() -> None:
         task_queue="smartinerary",
     )
 
+    await InProgressPlanStore().save(InProgressPlan(
+        plan_id=plan_id,
+        workflow_id=f"cli-{plan_id}",
+        user_id=user_id,
+        tenant_id="tenant-demo",
+        raw_goal=raw_goal,
+        origin=origin,
+        destination=destination,
+    ))
+
     itinerary = await wait_for_first_itinerary(handle)
     if itinerary is None:
         print("Timed out waiting for the itinerary to be generated.")
@@ -101,6 +112,7 @@ async def main() -> None:
         return
 
     await run_review_loop(handle, itinerary)
+    await InProgressPlanStore().delete(user_id, plan_id)
 
     print()
     print(f"Temporal UI: http://localhost:8233/namespaces/default/workflows/cli-{plan_id}")

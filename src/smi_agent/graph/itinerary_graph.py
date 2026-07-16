@@ -27,6 +27,11 @@ Implements the 6-stage end-to-end plan flow defined in the PRD (Section 5):
   compile_itinerary     Stage 6 · Versioned itinerary with per-segment handoff links (FR-PRS-1/3)
     │
     ▼
+  reflect_itinerary     Stage 6.5 · Critic pass — validates budget/completeness/quality;
+    │                   swaps one already-fetched candidate and loops back to merge_results
+    │                   when it finds a fixable issue (max 2 attempts, initial generation only)
+    ├─ [needs_regeneration] ──► merge_results (loop)
+    ▼
   await_confirmation    Stage 6 · HITL gate — no booking without explicit confirm (FR-GAT-3)
     │
     ▼
@@ -395,7 +400,7 @@ async def search_business_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["flight"] = flight_task
-        coros["flight"] = _run_flight(flight_task, constraints, sort_override="time")
+        coros["flight"] = run_flight_search(flight_task, constraints, sort_override="time")
 
     if "hotel_reply" not in reused:
         hotel_task = _make_task_request(
@@ -403,7 +408,7 @@ async def search_business_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["hotel"] = hotel_task
-        coros["hotel"] = _run_hotel(hotel_task, constraints, sort_override="proximity", business_only=True)
+        coros["hotel"] = run_hotel_search(hotel_task, constraints, sort_override="proximity", business_only=True)
 
     if "restaurant_reply" not in reused:
         restaurant_task = _make_task_request(
@@ -411,7 +416,7 @@ async def search_business_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["restaurant"] = restaurant_task
-        coros["restaurant"] = _run_restaurant(restaurant_task, constraints, business_only=True)
+        coros["restaurant"] = run_restaurant_search(restaurant_task, constraints, business_only=True)
 
     if not coros:
         await emitter.emit("search_business_specialists", "completed", "All specialist results reused from pre-fetch")
@@ -456,7 +461,7 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["flight"] = flight_task
-        coros["flight"] = _run_flight(flight_task, constraints)
+        coros["flight"] = run_flight_search(flight_task, constraints)
 
     if "hotel_reply" not in reused:
         hotel_task = _make_task_request(
@@ -464,7 +469,7 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["hotel"] = hotel_task
-        coros["hotel"] = _run_hotel(hotel_task, constraints)
+        coros["hotel"] = run_hotel_search(hotel_task, constraints)
 
     if "restaurant_reply" not in reused:
         restaurant_task = _make_task_request(
@@ -472,7 +477,7 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["restaurant"] = restaurant_task
-        coros["restaurant"] = _run_restaurant(restaurant_task, constraints)
+        coros["restaurant"] = run_restaurant_search(restaurant_task, constraints)
 
     if "attraction_reply" not in reused:
         attraction_task = _make_task_request(
@@ -480,7 +485,7 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
             constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
         )
         task_requests["attraction"] = attraction_task
-        coros["attraction"] = _run_attractions(attraction_task, constraints)
+        coros["attraction"] = run_attraction_search(attraction_task, constraints)
 
     if not coros:
         await emitter.emit("search_leisure_specialists", "completed", "All specialist results reused from pre-fetch")
@@ -505,7 +510,7 @@ async def search_leisure_specialists(state: ItineraryState) -> dict:
     return result
 
 
-async def _run_flight(
+async def run_flight_search(
     task: TaskRequest, constraints: TripConstraints, sort_override: str | None = None,
 ) -> TaskReply:
     from smi_agent.examples.travel.tools.location_resolver import to_iata
@@ -523,7 +528,7 @@ async def _run_flight(
     return _candidates_to_reply(results, assumptions=assumptions)
 
 
-async def _run_hotel(
+async def run_hotel_search(
     task: TaskRequest,
     constraints: TripConstraints,
     sort_override: str | None = None,
@@ -549,7 +554,7 @@ async def _run_hotel(
     return _candidates_to_reply(results, assumptions=assumptions)
 
 
-async def _run_restaurant(
+async def run_restaurant_search(
     task: TaskRequest, constraints: TripConstraints, business_only: bool = False,
 ) -> TaskReply:
     from smi_agent.examples.travel.tools.location_resolver import to_city_name
@@ -566,7 +571,7 @@ async def _run_restaurant(
     return _candidates_to_reply(results, assumptions=assumptions)
 
 
-async def _run_attractions(task: TaskRequest, constraints: TripConstraints) -> TaskReply:
+async def run_attraction_search(task: TaskRequest, constraints: TripConstraints) -> TaskReply:
     from smi_agent.examples.travel.tools.attraction_scraper import search_attractions
     from smi_agent.examples.travel.tools.location_resolver import to_city_name
     sort_by = "price" if constraints.get("sort_preference") == "cost" else "rating"
@@ -920,6 +925,225 @@ async def await_confirmation(state: ItineraryState) -> dict:
     }
 
 
+# ── Stage 6.5 · reflect_itinerary ─────────────────────────────────────────────
+
+_MAX_REFLECTION_ATTEMPTS = 2
+_REFLECTION_PROMPT_DIR = "prompts/agents/reflection"
+
+
+def _completeness_issues(itinerary: dict, trip_type: str) -> list[dict]:
+    issues: list[dict] = []
+    segments_by_type = {s.get("type"): s for s in itinerary.get("segments", [])}
+
+    flight = segments_by_type.get("flight")
+    if not flight or not flight.get("provider") or flight.get("provider") == "TBC":
+        issues.append({"section": "flight", "problem": "No confirmed flight option available"})
+
+    hotel = segments_by_type.get("hotel")
+    if not hotel or not hotel.get("provider") or hotel.get("provider") == "TBC":
+        issues.append({"section": "hotel", "problem": "No confirmed hotel option available"})
+
+    if not itinerary.get("dining_options"):
+        issues.append({"section": "restaurant", "problem": "No dining options found"})
+
+    if trip_type == "leisure" and not itinerary.get("attractions"):
+        issues.append({"section": "attraction", "problem": "No attractions found for a leisure trip"})
+
+    return issues
+
+
+def _budget_status(itinerary: dict, constraints: TripConstraints) -> dict:
+    """Report budget compliance for the traveler-facing quality_review.
+
+    Not a new check: policy_check already routes any breach to budget_agent
+    before compile_itinerary (and therefore reflect_itinerary) ever runs, so
+    this can never find a breach — it just surfaces the already-validated
+    figures for visibility alongside the completeness/quality findings.
+    """
+    budget = constraints.get("budget_gbp")
+    total = itinerary.get("total_cost_gbp") or 0.0
+    return {
+        "total_gbp": total,
+        "budget_gbp": budget,
+        "within_budget": not budget or total <= budget,
+    }
+
+
+class ReflectionAgent:
+    """Critic that reviews a compiled itinerary for completeness and quality.
+
+    Structured the same way as the specialist agents in agents/specialists/*.py
+    (name/description/run()), but — like IntentClassifierAgent — deliberately
+    independent of BaseSpecialist/StructuredResponse, since this belongs to
+    the active Temporal + LangGraph pipeline and returns a plain dict that
+    reflect_itinerary folds into ItineraryState.
+    """
+
+    @property
+    def name(self) -> str:
+        return "reflection"
+
+    @property
+    def description(self) -> str:
+        return "Reviews a compiled itinerary for completeness and quality issues (budget is reported, not re-checked — see _budget_status)."
+
+    async def run(self, itinerary: dict, constraints: TripConstraints, trip_type: str) -> dict:
+        """Returns {"quality_ok", "issues", "notes", "budget"}."""
+        issues = _completeness_issues(itinerary, trip_type)
+
+        llm_review = await self._llm_quality_review(itinerary)
+        issues.extend(llm_review.get("issues", []))
+
+        return {
+            "quality_ok": not issues and llm_review.get("quality_ok", True),
+            "issues": issues,
+            "notes": llm_review.get("notes", ""),
+            "budget": _budget_status(itinerary, constraints),
+        }
+
+    async def _llm_quality_review(self, itinerary: dict) -> dict:
+        try:
+            import json
+
+            from smi_agent.llm.prompts import PromptLoader
+            from smi_agent.llm.router import LLMRouter
+
+            prompt_loader = PromptLoader(_REFLECTION_PROMPT_DIR)
+            system_block = prompt_loader.render_system("system", {})
+
+            summary = {
+                "trip": itinerary.get("trip"),
+                "segments": [
+                    {"type": s.get("type"), "summary": s.get("summary"), "price_gbp": s.get("price_gbp")}
+                    for s in itinerary.get("segments", [])
+                ],
+                "total_cost_gbp": itinerary.get("total_cost_gbp"),
+                "assumptions": itinerary.get("assumptions"),
+            }
+            router = LLMRouter(lane="middle", temperature=0.1)
+            result = await router.call(
+                messages=[
+                    {"role": "system", "content": [system_block]},
+                    {"role": "user", "content": json.dumps(summary)},
+                ],
+                trace_name="reflect_itinerary",
+            )
+            text = result.content.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```[a-z]*\n?", "", text)
+                text = re.sub(r"\n?```$", "", text.strip())
+            parsed = json.loads(text)
+            return {
+                "quality_ok": bool(parsed.get("quality_ok", True)),
+                "issues": parsed.get("issues", []),
+                "notes": parsed.get("notes", ""),
+            }
+        except Exception as exc:
+            logger.warning("[%s] LLM quality review failed (%s) — treating as quality_ok", self.name, exc)
+            return {"quality_ok": True, "issues": [], "notes": "Quality review unavailable"}
+
+
+def _promote_next_untried(candidates: list[dict], tried_ids: list[str]) -> dict | None:
+    """Pick the best already-fetched candidate not yet tried by reflection.
+
+    Mirrors _reorder_to_front in activities/itinerary_workflow.py (promote a
+    candidate that's already been searched for, never trigger a new search)
+    but stays local to this module — graph/ doesn't import from activities/.
+    """
+    for candidate in candidates:
+        if candidate.get("id") not in tried_ids:
+            return candidate
+    return None
+
+
+async def reflect_itinerary(state: ItineraryState) -> dict:
+    """Critic pass: validate budget, completeness, and quality before the
+    traveler ever sees the itinerary. When a specific section is at fault and
+    an untried already-fetched candidate exists, swap to it and loop back
+    through merge/policy/compile — no new search is issued (FR-ORC-3).
+
+    Only auto-swaps on the initial generation, never on a HITL edit re-run
+    (skip_reparse=True): an edit is the traveler's deliberate choice and
+    should be flagged if it looks off, not silently overridden.
+    """
+    emitter = _emitter(state)
+    await emitter.emit("reflect_itinerary", "in_progress", "Reviewing itinerary...")
+
+    itinerary = state.get("itinerary") or {}
+    constraints = state.get("constraints") or {}
+    trip_type = state.get("trip_type", "leisure")
+    attempts = state.get("reflection_attempts", 0)
+    tried = {k: list(v) for k, v in (state.get("tried_candidate_ids") or {}).items()}
+
+    quality_review = await ReflectionAgent().run(itinerary, constraints, trip_type)
+    issues = quality_review["issues"]
+
+    plan_graph = dict(state.get("plan_graph") or {})
+    plan_graph["stages"] = plan_graph.get("stages", []) + ["reflect_itinerary"]
+
+    can_retry = not state.get("skip_reparse") and attempts < _MAX_REFLECTION_ATTEMPTS
+    fixable_sections = {"flight", "hotel", "restaurant", "attraction"}
+    replies_by_section = {
+        "flight": state.get("flight_reply") or {},
+        "hotel": state.get("hotel_reply") or {},
+        "restaurant": state.get("restaurant_reply") or {},
+        "attraction": state.get("attraction_reply") or {},
+    }
+
+    if can_retry:
+        for issue in issues:
+            section = issue.get("section")
+            if section not in fixable_sections:
+                continue
+            candidates = replies_by_section[section].get("candidates", [])
+            section_tried = tried.setdefault(section, [])
+            next_candidate = _promote_next_untried(candidates, section_tried)
+            if next_candidate is None:
+                continue
+
+            section_tried.append(next_candidate.get("id"))
+            reordered = sorted(candidates, key=lambda c: c.get("id") != next_candidate.get("id"))
+            new_reply = dict(replies_by_section[section])
+            new_reply["candidates"] = reordered
+
+            await emitter.emit(
+                "reflect_itinerary", "in_progress",
+                f"Swapping {section} to address: {issue.get('problem')}",
+            )
+
+            itinerary_with_review = dict(itinerary)
+            itinerary_with_review["quality_review"] = quality_review
+
+            return {
+                f"{section}_reply": new_reply,
+                "tried_candidate_ids": tried,
+                "reflection_attempts": attempts + 1,
+                "quality_review": quality_review,
+                "itinerary": itinerary_with_review,
+                "plan_graph": plan_graph,
+                "current_node": "reflect_itinerary",
+                "_needs_regeneration": True,
+            }
+
+    itinerary_with_review = dict(itinerary)
+    itinerary_with_review["quality_review"] = quality_review
+
+    await emitter.emit(
+        "reflect_itinerary", "completed",
+        "No issues found" if quality_review["quality_ok"] else f"{len(issues)} issue(s) noted for the traveler",
+    )
+
+    return {
+        "itinerary": itinerary_with_review,
+        "quality_review": quality_review,
+        "reflection_attempts": attempts,
+        "tried_candidate_ids": tried,
+        "plan_graph": plan_graph,
+        "current_node": "reflect_itinerary",
+        "_needs_regeneration": False,
+    }
+
+
 # ── Routing functions ──────────────────────────────────────────────────────────
 
 def _route_after_parse(
@@ -952,6 +1176,17 @@ def _route_after_policy(
     return "compile_itinerary"
 
 
+def _route_after_reflect(
+    state: ItineraryState,
+) -> Literal["merge_results", "await_confirmation"]:
+    """Loop back to recompute cost/policy/compile after a section swap, or
+    proceed to the HITL gate once the critic has nothing left to fix.
+    """
+    if state.get("_needs_regeneration"):
+        return "merge_results"
+    return "await_confirmation"
+
+
 # ── Graph builder ──────────────────────────────────────────────────────────────
 
 def build_itinerary_graph(checkpointer: Any = None) -> CompiledStateGraph[ItineraryState]:
@@ -981,6 +1216,7 @@ def build_itinerary_graph(checkpointer: Any = None) -> CompiledStateGraph[Itiner
     graph.add_node("policy_check", policy_check)
     graph.add_node("budget_agent", budget_agent)
     graph.add_node("compile_itinerary", compile_itinerary)
+    graph.add_node("reflect_itinerary", reflect_itinerary)
     graph.add_node("await_confirmation", await_confirmation)
 
     # Edges
@@ -1003,7 +1239,12 @@ def build_itinerary_graph(checkpointer: Any = None) -> CompiledStateGraph[Itiner
         _route_after_policy,
         {"compile_itinerary": "compile_itinerary", "budget_agent": "budget_agent"},
     )
-    graph.add_edge("compile_itinerary", "await_confirmation")
+    graph.add_edge("compile_itinerary", "reflect_itinerary")
+    graph.add_conditional_edges(
+        "reflect_itinerary",
+        _route_after_reflect,
+        {"merge_results": "merge_results", "await_confirmation": "await_confirmation"},
+    )
     graph.add_edge("await_confirmation", END)
     graph.add_edge("budget_agent", END)
 

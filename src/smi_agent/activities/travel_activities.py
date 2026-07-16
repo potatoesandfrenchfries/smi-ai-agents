@@ -91,6 +91,7 @@ class ItineraryResult:
     errors: list[str] = field(default_factory=list)
     budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
     resolved_constraints: dict = field(default_factory=dict)  # What parse_intent resolved — carried forward for HITL edits
+    quality_review: dict = field(default_factory=dict)  # reflect_itinerary's critic findings
 
 
 @dataclass
@@ -307,6 +308,7 @@ async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
         errors=result.get("errors") or [],
         budget_alternatives=result.get("budget_alternatives") or [],
         resolved_constraints=result.get("constraints") or {},
+        quality_review=itin.get("quality_review") or {},
     )
 
 

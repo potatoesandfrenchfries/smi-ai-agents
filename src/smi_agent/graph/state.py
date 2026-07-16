@@ -85,6 +85,12 @@ class ItineraryState(TypedDict):
         Literal["pending", "confirmed", "rejected"]
     ]
 
+    # ── Stage 6.5 · Reflection (critic) ───────────────────────────────────────
+    reflection_attempts: NotRequired[int]                 # Loop guard, default 0
+    tried_candidate_ids: NotRequired[dict[str, list[str]]] # Per-section ids already swapped to
+    quality_review: NotRequired[dict]                      # Critic findings, surfaced to the traveler
+    _needs_regeneration: NotRequired[bool]                 # Transient: routes reflect_itinerary back to merge_results
+
     # ── Housekeeping ──────────────────────────────────────────────────────────
     errors: NotRequired[list[str]]
     current_node: NotRequired[str]

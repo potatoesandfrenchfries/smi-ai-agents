@@ -1,0 +1,44 @@
+# Version control
+.git/
+.gitignore
+
+# CI / editor
+.github/
+.idea/
+.vscode/
+.ruff_cache/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs & local data
+logs/
+*.log
+data/trips/
+
+# Docs (not needed in image)
+*.pdf
+
+# macOS
+.DS_Store

@@ -74,10 +74,20 @@ async def run_conversation_turn(
         for err in result.get("errors") or []:
             await sse_streamer.publish_error(session_id, err)
 
-        # Publish final assistant reply (ensures client has complete text even
-        # if some streaming tokens were missed due to pub/sub timing)
+        # Supervisor-backed turns (SupervisorGraphAdapter) carry the full
+        # multi-agent StructuredResponse — publish it as a "response" event so
+        # the frontend renders its blocks/tables/entity-cards, same contract
+        # /api/v1/chat's supervisor_chat_endpoint already uses. Plain LangGraph
+        # turns have no such object and fall back to the flat token publish
+        # (ensures the client has complete text even if some streaming tokens
+        # were missed due to pub/sub timing).
+        structured_response = result.get("structured_response")
         assistant_reply = result.get("assistant_reply", "")
-        if assistant_reply:
+        if structured_response is not None:
+            await sse_streamer.publish_response(
+                session_id, structured_response.model_dump(mode="json", by_alias=True)
+            )
+        elif assistant_reply:
             await sse_streamer.publish_token(session_id, assistant_reply)
 
         # ── Postgres dual-write ───────────────────────────────────────────

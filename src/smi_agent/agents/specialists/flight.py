@@ -173,16 +173,20 @@ def _fmt_duration(minutes: int | None) -> str:
 
 
 def _parse_query(query: str, default_sort: str) -> tuple[str, str, str, str]:
-    """Very basic keyword extraction for prototype purposes.
+    """Keyword extraction for prototype purposes, used when the supervisor's
+    tool call didn't already resolve origin/destination/date into context.
 
-    In production this would be handled by the LLM parsing the query before
-    calling the specialist.
+    Origin/destination resolution reuses location_resolver's shared city
+    table (find_locations_in_text) rather than grabbing the first two
+    3-letter ALL-CAPS words in the query — that used to false-positive on
+    ordinary words like "the"/"top" and never matched a bare city name
+    ("Edinburgh") at all, since only real IATA codes are 3 letters.
     """
-    words = query.upper().split()
-    # Look for 3-letter IATA-like codes
-    codes = [w for w in words if len(w) == 3 and w.isalpha()]
-    origin = codes[0] if len(codes) > 0 else "UNK"
-    destination = codes[1] if len(codes) > 1 else "UNK"
+    from smi_agent.examples.travel.tools.location_resolver import find_locations_in_text
+
+    locations = find_locations_in_text(query)
+    origin = locations[0] if len(locations) > 0 else "UNK"
+    destination = locations[1] if len(locations) > 1 else "UNK"
 
     # Look for a date pattern YYYY-MM-DD
     import re

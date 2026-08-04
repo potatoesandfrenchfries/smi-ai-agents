@@ -33,11 +33,17 @@ async function getClient(): Promise<WorkflowClient> {
 export interface StartItineraryInput {
   planId: string;
   tenantId: string;
+  userId: string;
   rawGoal: string;
-  constraints?: Record<string, unknown>;
 }
 
-/** Starts (or, if planId was already submitted, rejoins) an itinerary workflow run. */
+/**
+ * Starts (or, if planId was already submitted, rejoins) an itinerary workflow
+ * run. Only raw_goal is required beyond identity — origin/destination/dates
+ * are left unset, so ItineraryWorkflow.run() resolves them itself from
+ * raw_goal via parse_trip_intent_activity before dispatching any search
+ * (see the "Step 0" comment in itinerary_workflow.py).
+ */
 export async function startItineraryWorkflow(
   input: StartItineraryInput
 ): Promise<WorkflowHandle> {
@@ -46,12 +52,15 @@ export async function startItineraryWorkflow(
     workflowId: input.planId,
     taskQueue: env.taskQueue,
     // Matches ItineraryWorkflowInput's field names in itinerary_workflow.py.
+    // Extra keys not present on that dataclass (e.g. a stray `constraints`)
+    // make Temporal's payload converter fail the whole activation with a
+    // TypeError, so keep this in lockstep with the dataclass — no more, no less.
     args: [
       {
         plan_id: input.planId,
         tenant_id: input.tenantId,
+        user_id: input.userId,
         raw_goal: input.rawGoal,
-        constraints: input.constraints ?? {},
       },
     ],
   });

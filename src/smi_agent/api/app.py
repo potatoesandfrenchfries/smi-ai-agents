@@ -70,7 +70,7 @@ def _require_user_id(x_auth_user_id: str | None = Header(default=None)) -> str:
     return x_auth_user_id
 
 
-def _get_pg_executor(agent_name: str = "conversation"):
+def _get_pg_executor(agent_name: str = "uc02_conversation"):
     """Get SafePostgresExecutor from app state. Raises 503 if unavailable."""
     pg_client = app.state.pg_client
     if pg_client is None:
@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     sse_streamer = SSEStreamer(redis_client)
 
     # Pre-build the default conversation graph at startup
-    agent_name = os.environ.get("SMI_CONVERSATION_AGENT_NAME", "conversation")
+    agent_name = os.environ.get("SMI_CONVERSATION_AGENT_NAME", "uc02_conversation")
     defn = load_agent_definition(agent_name)
     graph = build_conversation_graph(defn=defn, driver=driver, template_loader=template_loader)
 
@@ -138,6 +138,7 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     # Multi-agent supervisor framework
     from smi_agent.agents.registry import AgentRegistry
     from smi_agent.agents.supervisor import SupervisorAgent
+    from smi_agent.agents.supervisor_graph_adapter import SupervisorGraphAdapter
 
     agent_registry = AgentRegistry(
         neo4j_driver=driver,
@@ -147,6 +148,15 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     )
     app.state.agent_registry = agent_registry
     app.state.supervisor = SupervisorAgent(agent_registry=agent_registry)
+
+    # /api/v1/conversations/{id}/chat routes the default conversation agent
+    # through the supervisor + specialists system (SupervisorGraphAdapter),
+    # not the plain single-LLM-call LangGraph, so chat messages actually get
+    # classified and delegated to flight/hotel/restaurant/planner specialists
+    # instead of one model turn guessing the whole answer itself. See
+    # _get_or_build_graph below for the agent_name check that picks this path.
+    app.state.default_conversation_agent_name = agent_name
+    app.state.supervisor_graph = SupervisorGraphAdapter(app.state.supervisor)
 
     # Optionally start the queue worker
     worker_task: asyncio.Task | None = None
@@ -236,6 +246,8 @@ async def metrics_endpoint() -> Response:
 
 
 def _get_or_build_graph(app: FastAPI, agent_name: str) -> Any:
+    if agent_name == app.state.default_conversation_agent_name:
+        return app.state.supervisor_graph
     if agent_name not in app.state.graphs:
         defn = load_agent_definition(agent_name)
         app.state.graphs[agent_name] = build_conversation_graph(
@@ -590,6 +602,7 @@ async def conversation_chat_endpoint(
     state = {
         "session_id": session_id,
         "agent_name": conv["agentName"],
+        "user_id": user_id,
         "user_message": request.message,
         "page_context": page_ctx,
         "history": history,

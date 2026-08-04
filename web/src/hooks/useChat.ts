@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getMessages, streamChat } from "../api/client";
+import { encodeStructuredContent } from "../api/structuredContent";
 import type {
   ConversationCeiling,
   ConversationMessageItem,
@@ -93,17 +94,28 @@ export function useChat(conversationId: string | null) {
             case "error":
               return { ...s, error: event.data, isStreaming: false };
             case "done": {
+              // Structured (supervisor/specialist) turns never emit "token"
+              // events, only a single "response" — streamingText stays empty
+              // for those, so it alone can't gate whether there's a reply to
+              // keep. Encode structuredResponse the same way the backend
+              // persists it (see structuredContent.ts) so this locally-built
+              // message renders identically to one reloaded from Postgres.
+              const content = s.structuredResponse
+                ? encodeStructuredContent(s.structuredResponse.blocks)
+                : s.streamingText;
+              if (!content) return { ...s, isStreaming: false };
+
               const assistantMessage: ConversationMessageItem = {
                 id: `local-assistant-${Date.now()}`,
                 seq: s.messages.length + 1,
                 role: "assistant",
-                content: s.streamingText,
+                content,
                 tokens: null,
                 createdAt: new Date().toISOString(),
               };
               return {
                 ...s,
-                messages: s.streamingText ? [...s.messages, assistantMessage] : s.messages,
+                messages: [...s.messages, assistantMessage],
                 isStreaming: false,
               };
             }

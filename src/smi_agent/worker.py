@@ -69,6 +69,7 @@ from smi_agent.activities.travel_activities import (
     flight_search_activity,
     hotel_search_activity,
     itinerary_generation_activity,
+    parse_trip_intent_activity,
     persist_trip_activity,
     record_workflow_metric_activity,
     restaurant_search_activity,
@@ -84,7 +85,7 @@ AGENT_QUEUES: dict[str, list] = {
     HOTEL_QUEUE: [hotel_search_activity],
     RESTAURANT_QUEUE: [restaurant_search_activity],
     ATTRACTION_QUEUE: [attraction_search_activity],
-    ITINERARY_GENERATION_QUEUE: [itinerary_generation_activity],
+    ITINERARY_GENERATION_QUEUE: [itinerary_generation_activity, parse_trip_intent_activity],
     CORE_SERVICES_QUEUE: [persist_trip_activity, record_workflow_metric_activity],
 }
 

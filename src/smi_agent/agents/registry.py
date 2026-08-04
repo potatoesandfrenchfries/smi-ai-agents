@@ -159,6 +159,11 @@ class GenericSpecialist(BaseSpecialist):
                 "available_tools": ", ".join(registry.tool_names()),
                 "entity_labels": ", ".join(domain_schema.entity_labels),
                 "relationship_types": ", ".join(domain_schema.relationship_types),
+                # No page context at this layer (unlike conversation/nodes/generate.py,
+                # which builds a real one from PageContext.entity_snapshot) — empty
+                # string so templates referencing it (e.g. planner/system.j2's
+                # {% if entity_snapshot_summary %}) don't hit Jinja's StrictUndefined.
+                "entity_snapshot_summary": "",
             },
         )
 

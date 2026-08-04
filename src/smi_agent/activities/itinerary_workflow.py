@@ -71,11 +71,14 @@ with workflow.unsafe.imports_passed_through():
         ItineraryResult,
         PersistTripParams,
         RestaurantSearchParams,
+        TripIntentParams,
+        TripIntentResult,
         WorkflowMetricParams,
         attraction_search_activity,
         flight_search_activity,
         hotel_search_activity,
         itinerary_generation_activity,
+        parse_trip_intent_activity,
         persist_trip_activity,
         record_workflow_metric_activity,
         restaurant_search_activity,
@@ -91,10 +94,14 @@ class ItineraryWorkflowInput:
     tenant_id: str
     user_id: str
     raw_goal: str
-    origin: str
-    destination: str
-    check_in: str
-    check_out: str
+    # Callers that already collected structured trip fields (e.g. scripts/demo.py)
+    # can pass these directly. Callers with only free text (e.g. the gateway's
+    # POST /api/v1/trips) leave them unset — run() then resolves them itself via
+    # parse_trip_intent_activity before dispatching any search activity.
+    origin: str = ""
+    destination: str = ""
+    check_in: str = ""
+    check_out: str = ""
     sort_by: str = "cost"
     cuisine_preference: str | None = None
 
@@ -238,6 +245,61 @@ class ItineraryWorkflow:
         workflow.logger.info("Starting itinerary workflow for plan %s", input.plan_id)
         await self._record_metric("started")
 
+        # ── Step 0: Resolve trip constraints when the caller only gave raw_goal ──
+        # Callers with structured fields already (origin/destination/check_in/
+        # check_out) skip this — those values are trusted as-is, same as before.
+        # Callers with only free text (the gateway's POST /api/v1/trips collects
+        # nothing else) need those fields resolved before any search activity can
+        # run at all. Reuses the same LLM+regex extraction the LangGraph's
+        # parse_intent node uses (resolve_trip_constraints in itinerary_graph.py)
+        # via parse_trip_intent_activity, then threads the result through as
+        # resolved_constraints/skip_reparse=True below so itinerary_generation_activity
+        # doesn't redundantly re-parse raw_goal a second time.
+        origin = input.origin
+        destination = input.destination
+        check_in = input.check_in
+        check_out = input.check_out
+        sort_by = input.sort_by
+        resolved_constraints: dict | None = None
+
+        if not (origin and destination and check_in and check_out):
+            workflow.logger.info("No pre-resolved trip fields — parsing raw_goal via parse_trip_intent_activity")
+            intent: TripIntentResult = await workflow.execute_activity(
+                parse_trip_intent_activity,
+                TripIntentParams(raw_goal=input.raw_goal),
+                task_queue=ITINERARY_GENERATION_QUEUE,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=_default_retry(),
+            )
+            if intent.missing_fields:
+                workflow.logger.warning("Could not resolve required trip fields: %s", intent.missing_fields)
+                await self._record_metric("error")
+                return ItineraryWorkflowResult(
+                    plan_id=input.plan_id,
+                    status="error",
+                    errors=[
+                        "Could not determine "
+                        + ", ".join(intent.missing_fields)
+                        + " from the trip description — please include them explicitly."
+                    ],
+                )
+
+            origin = origin or intent.origin or ""
+            destination = destination or intent.destination or ""
+            check_in = check_in or intent.check_in or ""
+            check_out = check_out or intent.check_out or ""
+            sort_by = intent.sort_preference or sort_by
+            resolved_constraints = {
+                "origin": origin,
+                "destination": destination,
+                "check_in": check_in,
+                "check_out": check_out,
+                "budget_gbp": intent.budget_gbp,
+                "purpose": intent.purpose,
+                "traveler_count": intent.traveler_count,
+                "sort_preference": sort_by,
+            }
+
         # ── Step 1: Search — staged as a real agent-to-agent pipeline
         # (FR-ORC-4), not a flat fan-out: flight resolves first and hands its
         # arrival time to hotel search below; the resolved hotel then hands
@@ -260,8 +322,8 @@ class ItineraryWorkflow:
         # once here rather than passing the same (likely IATA) destination
         # to every activity and having the OSM-based ones silently fail to
         # match anything real.
-        destination_city = to_city_name(input.destination)
-        destination_iata = to_iata(input.destination)
+        destination_city = to_city_name(destination)
+        destination_iata = to_iata(destination)
 
         errors: list[str] = []
 
@@ -270,10 +332,10 @@ class ItineraryWorkflow:
             flights = await workflow.execute_activity(
                 flight_search_activity,
                 FlightSearchParams(
-                    origin=to_iata(input.origin),
+                    origin=to_iata(origin),
                     destination=destination_iata,
-                    date=input.check_in,
-                    sort_by=input.sort_by,
+                    date=check_in,
+                    sort_by=sort_by,
                 ),
                 task_queue=FLIGHT_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
@@ -290,9 +352,9 @@ class ItineraryWorkflow:
                 hotel_search_activity,
                 HotelSearchParams(
                     location=destination_city,
-                    check_in=input.check_in,
-                    check_out=input.check_out,
-                    sort_by="rating" if input.sort_by == "comfort" else "price",
+                    check_in=check_in,
+                    check_out=check_out,
+                    sort_by="rating" if sort_by == "comfort" else "price",
                 ),
                 task_queue=HOTEL_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
@@ -319,7 +381,7 @@ class ItineraryWorkflow:
                 attraction_search_activity,
                 AttractionSearchParams(
                     location=destination_city,
-                    sort_by="price" if input.sort_by == "cost" else "rating",
+                    sort_by="price" if sort_by == "cost" else "rating",
                 ),
                 task_queue=ATTRACTION_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
@@ -358,17 +420,23 @@ class ItineraryWorkflow:
                     plan_id=input.plan_id,
                     tenant_id=input.tenant_id,
                     raw_goal=input.raw_goal,
-                    origin=input.origin,
-                    destination=input.destination,
-                    check_in=input.check_in,
-                    check_out=input.check_out,
-                    sort_by=input.sort_by,
+                    origin=origin,
+                    destination=destination,
+                    check_in=check_in,
+                    check_out=check_out,
+                    sort_by=sort_by,
                     flights=flights,
                     hotels=hotels,
                     restaurants=restaurants,
                     attractions=attractions,
                     flight_arrival=self._current_flight_arrival(),
                     hotel_name=self._current_hotel_name(),
+                    # Step 0 already resolved constraints from raw_goal when the
+                    # caller only gave free text — trust them as-is here instead
+                    # of having the graph's own parse_intent re-derive (and
+                    # potentially diverge from) the same fields a second time.
+                    resolved_constraints=resolved_constraints,
+                    skip_reparse=resolved_constraints is not None,
                 ),
                 task_queue=ITINERARY_GENERATION_QUEUE,
                 start_to_close_timeout=timedelta(seconds=60),
@@ -493,10 +561,10 @@ class ItineraryWorkflow:
                 user_id=input.user_id,
                 tenant_id=input.tenant_id,
                 status=final_result.status,
-                origin=input.origin,
+                origin=origin,
                 destination=destination_city,
-                check_in=input.check_in,
-                check_out=input.check_out,
+                check_in=check_in,
+                check_out=check_out,
                 segments=final_result.segments,
                 dining_options=final_result.dining_options,
                 total_cost_gbp=final_result.total_cost_gbp,

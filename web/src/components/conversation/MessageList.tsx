@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ConversationMessageItem, StructuredResponse } from "../../api/types";
+import { parseStructuredContent } from "../../api/structuredContent";
 import { BlockRenderer } from "./BlockRenderer";
 import styles from "./MessageList.module.css";
 
@@ -32,12 +33,25 @@ export function MessageList({
         </div>
       )}
 
-      {messages.map((m) => (
-        <div key={m.id} className={styles.row} data-role={m.role}>
-          <div className={styles.roleLabel}>{m.role}</div>
-          <div className={styles.bubble}>{m.content}</div>
-        </div>
-      ))}
+      {messages.map((m) => {
+        const blocks = m.role === "assistant" ? parseStructuredContent(m.content) : null;
+        return (
+          <div key={m.id} className={styles.row} data-role={m.role}>
+            <div className={styles.roleLabel}>{m.role}</div>
+            <div className={styles.bubble}>
+              {blocks ? (
+                <div className={styles.blocks}>
+                  {blocks.map((b, i) => (
+                    <BlockRenderer key={i} block={b} />
+                  ))}
+                </div>
+              ) : (
+                m.content
+              )}
+            </div>
+          </div>
+        );
+      })}
 
       {isStreaming && (structuredResponse || streamingText) && (
         <div className={styles.row} data-role="assistant">

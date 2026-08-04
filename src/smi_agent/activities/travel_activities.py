@@ -57,6 +57,24 @@ class AttractionSearchParams:
 
 
 @dataclass
+class TripIntentParams:
+    raw_goal: str
+
+
+@dataclass
+class TripIntentResult:
+    origin: str | None = None
+    destination: str | None = None
+    check_in: str | None = None
+    check_out: str | None = None
+    budget_gbp: float | None = None
+    purpose: str = "leisure"
+    traveler_count: int = 1
+    sort_preference: str = "cost"
+    missing_fields: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ItineraryParams:
     plan_id: str
     tenant_id: str
@@ -204,6 +222,42 @@ async def attraction_search_activity(params: AttractionSearchParams) -> list[dic
         )
         activity.logger.info("Attraction search returned %d results", len(results))
         return results
+
+
+@activity.defn
+async def parse_trip_intent_activity(params: TripIntentParams) -> TripIntentResult:
+    """Extract structured trip constraints from a free-text goal.
+
+    ItineraryWorkflow calls this first when the caller (e.g. the gateway's
+    POST /api/v1/trips, which only collects free text) didn't supply
+    pre-resolved origin/destination/check_in/check_out — the search
+    activities below need those before they can run. Reuses the exact same
+    LLM+regex extraction the LangGraph's parse_intent node uses (see
+    resolve_trip_constraints in graph/itinerary_graph.py), so there is one
+    source of truth for turning raw_goal into TripConstraints.
+    """
+    from smi_agent.graph.itinerary_graph import resolve_trip_constraints
+    from smi_agent.observability.metrics import track_agent_execution
+
+    with track_agent_execution("parse_trip_intent"):
+        activity.logger.info("Parsing trip intent from raw_goal=%r", params.raw_goal[:160])
+        constraints, missing = await resolve_trip_constraints(params.raw_goal)
+        activity.logger.info(
+            "Trip intent parsed: origin=%s destination=%s check_in=%s check_out=%s missing=%s",
+            constraints.get("origin"), constraints.get("destination"),
+            constraints.get("check_in"), constraints.get("check_out"), missing,
+        )
+        return TripIntentResult(
+            origin=constraints.get("origin"),
+            destination=constraints.get("destination"),
+            check_in=constraints.get("check_in"),
+            check_out=constraints.get("check_out"),
+            budget_gbp=constraints.get("budget_gbp"),
+            purpose=constraints.get("purpose") or "leisure",
+            traveler_count=constraints.get("traveler_count") or 1,
+            sort_preference=constraints.get("sort_preference") or "cost",
+            missing_fields=missing,
+        )
 
 
 @activity.defn

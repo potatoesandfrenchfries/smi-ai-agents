@@ -17,7 +17,6 @@ tripsRouter.use(requireUserId);
 
 const createTripSchema = z.object({
   rawGoal: z.string().min(1).max(4000),
-  constraints: z.record(z.unknown()).optional(),
 });
 
 /**
@@ -41,8 +40,8 @@ tripsRouter.post("/", async (req, res) => {
     await startItineraryWorkflow({
       planId,
       tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
       rawGoal: parsed.data.rawGoal,
-      constraints: parsed.data.constraints,
     });
     res.status(202).json({ planId, status: "planning" });
   } catch (err) {

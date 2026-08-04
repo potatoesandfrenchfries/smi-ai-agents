@@ -10,9 +10,6 @@ import type {
   Paginated,
 } from "./types";
 
-/** True once a real gateway call has failed, so we stop re-attempting it every render. */
-let gatewayKnownUnreachable = false;
-
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${GATEWAY_URL}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
@@ -33,23 +30,19 @@ async function send<T>(path: string, method: string, body?: unknown): Promise<T>
 // ── Conversations ──────────────────────────────────────────────────────────
 
 export async function listConversations(): Promise<Paginated<ConversationListItem>> {
-  if (gatewayKnownUnreachable) return mock.mockListConversations();
   try {
     return await get<Paginated<ConversationListItem>>("/api/v1/conversations");
   } catch {
-    gatewayKnownUnreachable = true;
     return mock.mockListConversations();
   }
 }
 
 export async function createConversation(): Promise<ConversationListItem> {
-  if (gatewayKnownUnreachable) return mock.mockCreateConversation();
   try {
     return await send<ConversationListItem>("/api/v1/conversations", "POST", {
       agentName: "uc02_conversation",
     });
   } catch {
-    gatewayKnownUnreachable = true;
     return mock.mockCreateConversation();
   }
 }
@@ -57,7 +50,7 @@ export async function createConversation(): Promise<ConversationListItem> {
 export async function getMessages(
   conversationId: string
 ): Promise<Paginated<ConversationMessageItem>> {
-  if (gatewayKnownUnreachable || conversationId.startsWith("mock-")) {
+  if (conversationId.startsWith("mock-")) {
     return mock.mockGetMessages(conversationId);
   }
   try {
@@ -81,7 +74,7 @@ export function streamChat(
   const controller = new AbortController();
 
   const run = async () => {
-    if (gatewayKnownUnreachable || conversationId.startsWith("mock-")) {
+    if (conversationId.startsWith("mock-")) {
       await mock.mockStreamChat(conversationId, message, onEvent, controller.signal);
       return;
     }
@@ -99,7 +92,6 @@ export function streamChat(
       await consumeChatStream(res, onEvent, controller.signal);
     } catch (err) {
       if (controller.signal.aborted) return;
-      gatewayKnownUnreachable = true;
       await mock.mockStreamChat(conversationId, message, onEvent, controller.signal);
     }
   };
@@ -111,17 +103,15 @@ export function streamChat(
 // ── Itinerary / HITL (gateway trips surface) ───────────────────────────────
 
 export async function startTrip(rawGoal: string): Promise<{ planId: string }> {
-  if (gatewayKnownUnreachable) return { planId: `mock-plan-${Date.now()}` };
   try {
     return await send<{ planId: string }>("/api/v1/trips", "POST", { rawGoal });
   } catch {
-    gatewayKnownUnreachable = true;
     return { planId: `mock-plan-${Date.now()}` };
   }
 }
 
 export async function getItinerary(planId: string): Promise<ItineraryView> {
-  if (gatewayKnownUnreachable || planId.startsWith("mock-")) return mock.mockItinerary(planId);
+  if (planId.startsWith("mock-")) return mock.mockItinerary(planId);
   try {
     const res = await get<{ itinerary: ItineraryView }>(`/api/v1/trips/${planId}`);
     return res.itinerary;
@@ -131,7 +121,7 @@ export async function getItinerary(planId: string): Promise<ItineraryView> {
 }
 
 export async function getEditLog(planId: string): Promise<EditLogEntry[]> {
-  if (gatewayKnownUnreachable || planId.startsWith("mock-")) return mock.mockEditLog();
+  if (planId.startsWith("mock-")) return mock.mockEditLog();
   try {
     const res = await get<{ editLog: EditLogEntry[] }>(`/api/v1/trips/${planId}/edit-log`);
     return res.editLog;
@@ -141,12 +131,12 @@ export async function getEditLog(planId: string): Promise<EditLogEntry[]> {
 }
 
 export async function confirmTrip(planId: string): Promise<void> {
-  if (gatewayKnownUnreachable || planId.startsWith("mock-")) return;
+  if (planId.startsWith("mock-")) return;
   await send(`/api/v1/trips/${planId}/confirm`, "POST");
 }
 
 export async function rejectTrip(planId: string): Promise<void> {
-  if (gatewayKnownUnreachable || planId.startsWith("mock-")) return;
+  if (planId.startsWith("mock-")) return;
   await send(`/api/v1/trips/${planId}/reject`, "POST");
 }
 
@@ -154,6 +144,6 @@ export async function requestTripChanges(
   planId: string,
   edit: { section: string; candidateId: string; note?: string }
 ): Promise<void> {
-  if (gatewayKnownUnreachable || planId.startsWith("mock-")) return;
+  if (planId.startsWith("mock-")) return;
   await send(`/api/v1/trips/${planId}/changes`, "POST", edit);
 }

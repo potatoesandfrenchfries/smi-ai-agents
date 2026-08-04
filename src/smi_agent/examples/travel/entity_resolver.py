@@ -14,23 +14,23 @@ class TravelEntityResolver(EntityResolver):
     ) -> str:
         # List pages → general conversation agent
         if label and context_type:
-            return "conversation"
+            return "uc02_conversation"
 
         # Detail pages → specific agent or conversation
         detail_agents = {
-            "flight": "conversation",
-            "hotel": "conversation",
-            "booking": "conversation",
-            "destination": "conversation",
-            "airline": "conversation",
-            "traveler": "conversation",
-            "itinerary": "conversation",
+            "flight": "uc02_conversation",
+            "hotel": "uc02_conversation",
+            "booking": "uc02_conversation",
+            "destination": "uc02_conversation",
+            "airline": "uc02_conversation",
+            "traveler": "uc02_conversation",
+            "itinerary": "uc02_conversation",
         }
 
         if context_type in detail_agents:
             return detail_agents[context_type]
 
-        return "conversation"
+        return "uc02_conversation"
 
     def entity_id_required(self, context_type: str) -> bool:
         # Detail pages need entityId, list pages (with labels) don't

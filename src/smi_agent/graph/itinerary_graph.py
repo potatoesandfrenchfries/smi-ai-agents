@@ -194,44 +194,22 @@ async def _llm_parse(goal: str) -> dict | None:
         return None
 
 
-async def parse_intent(state: ItineraryState) -> dict:
-    """Extract typed TripConstraints from the raw natural-language goal.
+async def resolve_trip_constraints(raw_goal: str) -> tuple[TripConstraints, list[str]]:
+    """Extract typed TripConstraints from a free-text trip goal.
 
-    Primary path: Gemini Flash Lite (triage lane) extracts all fields including
-    natural date expressions ("9th September", "4 days from Monday") and synonyms.
+    Primary path: triage-lane LLM extracts all fields including natural date
+    expressions ("9th September", "4 days from Monday") and synonyms.
     Fallback: regex keyword extraction when the LLM call fails.
 
-    HITL edit re-runs set skip_reparse=True and supply constraints directly
-    (e.g. an updated budget_gbp) — trust those as-is instead of re-deriving
-    from raw_goal, both because raw_goal hasn't changed (so re-parsing would
-    just discard the edit) and because it avoids a wasted LLM call per edit.
+    Pure function — no graph state, no emitter — so it can run both as the
+    LangGraph's parse_intent node (below) and standalone, as
+    parse_trip_intent_activity does (activities/travel_activities.py) when
+    ItineraryWorkflow only received raw_goal with no pre-resolved trip
+    fields, before any search activity can be dispatched.
 
-    Implements: FR-INT-1 (accept NL goal), FR-INT-2 (parse into Trip + Constraints),
-                FR-INT-3 (identify missing fields).
+    Returns (constraints, missing_required_fields).
     """
-    emitter = _emitter(state)
-
-    if state.get("skip_reparse") and state.get("constraints"):
-        constraints = state["constraints"]
-        missing = _missing_fields(constraints)
-        trip_type = _classify_trip_type(constraints.get("purpose"))
-        await emitter.emit("parse_intent", "completed", f"Using edited constraints | trip_type={trip_type}")
-        return {
-            "constraints": constraints,
-            "needs_input": missing,
-            "trip_type": trip_type,
-            "current_node": "parse_intent",
-            "plan_graph": {
-                "plan_id": state["plan_id"],
-                "raw_goal": state["raw_goal"],
-                "parsed_at": datetime.utcnow().isoformat(),
-                "stages": ["parse_intent"],
-            },
-        }
-
-    await emitter.emit("parse_intent", "in_progress", "Parsing travel goal...")
-
-    goal = state["raw_goal"]
+    goal = raw_goal
     goal_lower = goal.lower()
 
     # ── Primary: LLM extraction ───────────────────────────────────────────────
@@ -296,8 +274,44 @@ async def parse_intent(state: ItineraryState) -> dict:
         sort_preference=sort_pref,
     )
 
-    missing = _missing_fields(constraints)
-    trip_type = _classify_trip_type(purpose)
+    return constraints, _missing_fields(constraints)
+
+
+async def parse_intent(state: ItineraryState) -> dict:
+    """Extract typed TripConstraints from the raw natural-language goal.
+
+    HITL edit re-runs set skip_reparse=True and supply constraints directly
+    (e.g. an updated budget_gbp) — trust those as-is instead of re-deriving
+    from raw_goal, both because raw_goal hasn't changed (so re-parsing would
+    just discard the edit) and because it avoids a wasted LLM call per edit.
+
+    Implements: FR-INT-1 (accept NL goal), FR-INT-2 (parse into Trip + Constraints),
+                FR-INT-3 (identify missing fields).
+    """
+    emitter = _emitter(state)
+
+    if state.get("skip_reparse") and state.get("constraints"):
+        constraints = state["constraints"]
+        missing = _missing_fields(constraints)
+        trip_type = _classify_trip_type(constraints.get("purpose"))
+        await emitter.emit("parse_intent", "completed", f"Using edited constraints | trip_type={trip_type}")
+        return {
+            "constraints": constraints,
+            "needs_input": missing,
+            "trip_type": trip_type,
+            "current_node": "parse_intent",
+            "plan_graph": {
+                "plan_id": state["plan_id"],
+                "raw_goal": state["raw_goal"],
+                "parsed_at": datetime.utcnow().isoformat(),
+                "stages": ["parse_intent"],
+            },
+        }
+
+    await emitter.emit("parse_intent", "in_progress", "Parsing travel goal...")
+
+    constraints, missing = await resolve_trip_constraints(state["raw_goal"])
+    trip_type = _classify_trip_type(constraints.get("purpose"))
 
     if missing:
         await emitter.emit(
@@ -308,7 +322,8 @@ async def parse_intent(state: ItineraryState) -> dict:
     else:
         await emitter.emit(
             "parse_intent", "completed",
-            f"{origin} → {destination} | {check_in} to {check_out} | trip_type={trip_type}"
+            f"{constraints['origin']} → {constraints['destination']} | "
+            f"{constraints['check_in']} to {constraints['check_out']} | trip_type={trip_type}"
         )
 
     return {

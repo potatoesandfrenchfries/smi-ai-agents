@@ -1,0 +1,68 @@
+/**
+ * Design tokens.
+ *
+ * The console is deliberately two-toned: the conversation side reads like an
+ * operations terminal (dark, monospace-inflected — the orchestrator "thinking
+ * out loud"), and the itinerary side reads like a printed manifest laid on a
+ * desk (warm paper, a serif display face, ticket-stub segment cards). The
+ * split mirrors the product itself: one side is the agent reasoning, the
+ * other is the accountable paper trail a human signs off on.
+ */
+
+:root {
+  /* ── Ink (conversation / console) ───────────────────────────────────── */
+  --ink: #12151c;
+  --ink-raised: #1a1f29;
+  --ink-raised-2: #212734;
+  --ink-line: #2a3140;
+  --ink-text: #e9e7df;
+  --ink-text-dim: #9aa2b2;
+
+  /* ── Paper (itinerary / manifest) ────────────────────────────────────── */
+  --paper: #f5f1e7;
+  --paper-raised: #fbf8f1;
+  --paper-line: #dcd3b8;
+  --paper-text: #262019;
+  --paper-text-dim: #6f6656;
+
+  /* ── Signal colors — status telltales, used sparingly and consistently ── */
+  --amber: #e2a33b;
+  --amber-dim: #4a3a1f;
+  --green: #4e9f72;
+  --green-dim: #1f3a2c;
+  --red: #d1594b;
+  --red-dim: #3d2420;
+  --teal: #3fa6a0;
+  --teal-dim: #1c3634;
+
+  /* ── Type ────────────────────────────────────────────────────────────── */
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* ── Scale ───────────────────────────────────────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  --shadow-card: 0 1px 2px rgba(18, 21, 28, 0.08), 0 8px 24px rgba(18, 21, 28, 0.10);
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,77 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--paper);
+  color: var(--paper-text);
+  min-width: 0;
+}
+
+.empty {
+  margin: auto;
+  max-width: 280px;
+  text-align: center;
+  color: var(--paper-text-dim);
+  padding: var(--space-6);
+}
+.emptyHint {
+  font-size: 13px;
+  margin-top: var(--space-2);
+}
+
+.header {
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: 1px solid var(--paper-line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.headerTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.version {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--paper-text-dim);
+}
+
+.total {
+  font-family: var(--font-display);
+  font-size: 32px;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.totalLabel {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--paper-text-dim);
+}
+
+.assumptions {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.1em;
+  font-size: 12px;
+  color: var(--paper-text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.segments {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}

@@ -55,6 +55,14 @@ with workflow.unsafe.imports_passed_through():
     # Imports here are only resolved at worker startup, not during workflow replay.
     # Putting them inside the unsafe context prevents Temporal's sandbox from
     # blocking standard library imports that are safe but not deterministic.
+    from smi_agent.activities.task_queues import (
+        ATTRACTION_QUEUE,
+        CORE_SERVICES_QUEUE,
+        FLIGHT_QUEUE,
+        HOTEL_QUEUE,
+        ITINERARY_GENERATION_QUEUE,
+        RESTAURANT_QUEUE,
+    )
     from smi_agent.activities.travel_activities import (
         AttractionSearchParams,
         FlightSearchParams,
@@ -103,6 +111,7 @@ class ItineraryWorkflowResult:
     errors: list[str] = field(default_factory=list)
     budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
     quality_review: dict = field(default_factory=dict)  # reflect_itinerary's critic findings
+    decision_log: list[dict] = field(default_factory=list)  # Selected vs. rejected candidates per section, with reasons
 
 
 @dataclass
@@ -201,10 +210,25 @@ class ItineraryWorkflow:
     # Recorded via an activity, never inline — Temporal replays workflow code
     # from history, which would double-count a plain counter.inc() call here.
 
+    # ── Agent-to-agent handoff (FR-ORC-4) ───────────────────────────────────
+    # Read fresh from self._replies (not cached from the initial search) so
+    # an edit that reorders the flight/hotel candidates — request_changes()
+    # promotes a different one to the front — is reflected the next time
+    # itinerary_generation_activity runs, not just on the very first pass.
+
+    def _current_flight_arrival(self) -> str | None:
+        flights = self._replies.get("flight") or []
+        return flights[0].get("arrival") if flights else None
+
+    def _current_hotel_name(self) -> str | None:
+        hotels = self._replies.get("hotel") or []
+        return hotels[0].get("name") if hotels else None
+
     async def _record_metric(self, status: str) -> None:
         await workflow.execute_activity(
             record_workflow_metric_activity,
             WorkflowMetricParams(workflow_name="ItineraryWorkflow", status=status),
+            task_queue=CORE_SERVICES_QUEUE,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=_default_retry(),
         )
@@ -214,17 +238,22 @@ class ItineraryWorkflow:
         workflow.logger.info("Starting itinerary workflow for plan %s", input.plan_id)
         await self._record_metric("started")
 
-        # ── Step 1: Fan out to all four search activities in parallel ───────────
-        # All four run concurrently. Total latency = slowest activity, not sum.
-        # Temporal retries each independently per _default_retry(); if one still
-        # exhausts its retries, return_exceptions=True stops that single failure
-        # from taking down the others (and the whole workflow) with it — mirrors
-        # the isolation the LangGraph layer does one level down.
+        # ── Step 1: Search — staged as a real agent-to-agent pipeline
+        # (FR-ORC-4), not a flat fan-out: flight resolves first and hands its
+        # arrival time to hotel search below; the resolved hotel then hands
+        # its location to restaurant/attraction search, which still run
+        # concurrently with each other since neither depends on the other.
+        # Temporal retries each activity independently per _default_retry();
+        # a failure in one is isolated (try/except for the sequential legs,
+        # return_exceptions=True for the concurrent pair) rather than taking
+        # down the whole workflow — mirrors the isolation the LangGraph layer
+        # does one level down.
         #
-        # Attractions are always fetched alongside the rest (mock data, cheap) —
-        # whether they're actually shown depends on the business/leisure
-        # classification the graph makes from raw_goal in itinerary_generation_activity.
-        workflow.logger.info("Dispatching parallel search activities...")
+        # Attractions are always fetched alongside restaurants (mock data,
+        # cheap) — whether they're actually shown depends on the
+        # business/leisure classification the graph makes from raw_goal in
+        # itinerary_generation_activity.
+        workflow.logger.info("Dispatching search activities (flight -> hotel -> restaurant/attraction)...")
 
         # Flight search needs an IATA code; the OSM-backed hotel/restaurant/
         # attraction searches need a real place name — resolve both forms
@@ -234,8 +263,11 @@ class ItineraryWorkflow:
         destination_city = to_city_name(input.destination)
         destination_iata = to_iata(input.destination)
 
-        search_results = await asyncio.gather(
-            workflow.execute_activity(
+        errors: list[str] = []
+
+        # Stage 1: flight (feeds hotel below)
+        try:
+            flights = await workflow.execute_activity(
                 flight_search_activity,
                 FlightSearchParams(
                     origin=to_iata(input.origin),
@@ -243,10 +275,18 @@ class ItineraryWorkflow:
                     date=input.check_in,
                     sort_by=input.sort_by,
                 ),
+                task_queue=FLIGHT_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_default_retry(),
-            ),
-            workflow.execute_activity(
+            )
+        except Exception as exc:
+            workflow.logger.error("flight_search_activity failed after retries: %s", exc)
+            errors.append(f"flight_search: {exc}")
+            flights = []
+
+        # Stage 2: hotel, receives the flight's arrival time (feeds restaurant/attraction below)
+        try:
+            hotels = await workflow.execute_activity(
                 hotel_search_activity,
                 HotelSearchParams(
                     location=destination_city,
@@ -254,15 +294,24 @@ class ItineraryWorkflow:
                     check_out=input.check_out,
                     sort_by="rating" if input.sort_by == "comfort" else "price",
                 ),
+                task_queue=HOTEL_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_default_retry(),
-            ),
+            )
+        except Exception as exc:
+            workflow.logger.error("hotel_search_activity failed after retries: %s", exc)
+            errors.append(f"hotel_search: {exc}")
+            hotels = []
+
+        # Stage 3: restaurant + attraction, receive the resolved hotel location
+        restaurant_result, attraction_result = await asyncio.gather(
             workflow.execute_activity(
                 restaurant_search_activity,
                 RestaurantSearchParams(
                     location=destination_city,
                     cuisine=input.cuisine_preference,
                 ),
+                task_queue=RESTAURANT_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_default_retry(),
             ),
@@ -272,17 +321,14 @@ class ItineraryWorkflow:
                     location=destination_city,
                     sort_by="price" if input.sort_by == "cost" else "rating",
                 ),
+                task_queue=ATTRACTION_QUEUE,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_default_retry(),
             ),
             return_exceptions=True,
         )
-
-        errors: list[str] = []
-        flights, hotels, restaurants, attractions = (
-            _unwrap_search_result(result, name, errors)
-            for result, name in zip(search_results, ("flight", "hotel", "restaurant", "attraction"))
-        )
+        restaurants = _unwrap_search_result(restaurant_result, "restaurant", errors)
+        attractions = _unwrap_search_result(attraction_result, "attraction", errors)
 
         workflow.logger.info(
             "Search complete — flights: %d, hotels: %d, restaurants: %d, attractions: %d",
@@ -321,7 +367,10 @@ class ItineraryWorkflow:
                     hotels=hotels,
                     restaurants=restaurants,
                     attractions=attractions,
+                    flight_arrival=self._current_flight_arrival(),
+                    hotel_name=self._current_hotel_name(),
                 ),
+                task_queue=ITINERARY_GENERATION_QUEUE,
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=_default_retry(),
             )
@@ -399,9 +448,12 @@ class ItineraryWorkflow:
                             hotels=self._replies.get("hotel", []),
                             restaurants=self._replies.get("restaurant", []),
                             attractions=self._replies.get("attraction", []),
+                            flight_arrival=self._current_flight_arrival(),
+                            hotel_name=self._current_hotel_name(),
                             resolved_constraints=self._constraints,
                             skip_reparse=True,
                         ),
+                        task_queue=ITINERARY_GENERATION_QUEUE,
                         start_to_close_timeout=timedelta(seconds=60),
                         retry_policy=_default_retry(),
                     )
@@ -426,6 +478,7 @@ class ItineraryWorkflow:
             errors=errors + self._itinerary.errors,
             budget_alternatives=self._itinerary.budget_alternatives,
             quality_review=self._itinerary.quality_review,
+            decision_log=self._itinerary.decision_log,
         )
 
         await self._record_metric("confirmed")
@@ -452,6 +505,7 @@ class ItineraryWorkflow:
                 errors=final_result.errors,
                 budget_alternatives=final_result.budget_alternatives,
             ),
+            task_queue=CORE_SERVICES_QUEUE,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=_default_retry(),
         )

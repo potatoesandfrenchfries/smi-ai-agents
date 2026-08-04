@@ -6,7 +6,14 @@ import json
 import logging
 from typing import Any
 
-from smi_agent.agents.response import ResponseType, StructuredResponse
+from smi_agent.agents.response import (
+    ContentBlock,
+    StructuredResponse,
+    TableColumn,
+    TableContent,
+    error_block,
+    text_block,
+)
 from smi_agent.agents.specialists.base import BaseSpecialist
 from smi_agent.streaming import StepEmitter
 
@@ -15,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 class HotelSpecialist(BaseSpecialist):
     """Finds and ranks available hotels for a given location and stay period."""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        """Accepts (and ignores) AgentRegistry's shared-client kwargs — see
+        FlightSpecialist.__init__ for why."""
 
     @property
     def name(self) -> str:
@@ -50,20 +61,26 @@ class HotelSpecialist(BaseSpecialist):
         )
 
         try:
+            from smi_agent.providers.explain import annotate_reasons
+
             hotels = await get_hotel_provider().search(
                 location=location,
                 check_in=check_in,
                 check_out=check_out,
                 sort_by=sort_by,
             )
+            hotels = annotate_reasons(
+                hotels, sort_by=sort_by, price_field="total_price_gbp",
+                rating_field="rating", proximity_field="distance_from_centre_km",
+            )
         except Exception as exc:
             logger.exception("HotelSpecialist: hotel provider search failed")
             await step_emitter.emit("hotel_search", "failed", str(exc))
             return StructuredResponse(
                 agent=self.name,
-                responseType=ResponseType.error,
+                responseType="error",
                 status="error",
-                blocks=[{"type": "error", "message": f"Hotel search failed: {exc}"}],
+                blocks=[error_block("Hotel search failed", str(exc))],
             )
 
         await step_emitter.emit("hotel_search", "completed", f"Found {len(hotels)} hotel(s)")
@@ -71,26 +88,27 @@ class HotelSpecialist(BaseSpecialist):
         if not hotels:
             return StructuredResponse(
                 agent=self.name,
-                responseType=ResponseType.entity_list,
+                responseType="entity_list",
                 status="no_data",
-                blocks=[{
-                    "type": "text",
-                    "content": f"No hotels found in {location} for {check_in} to {check_out}. "
-                               "Try a nearby area or different dates.",
-                }],
+                blocks=[text_block(
+                    f"No hotels found in {location} for {check_in} to {check_out}. "
+                    "Try a nearby area or different dates."
+                )],
             )
 
         nights = hotels[0].get("nights", 1)
-        table_rows = [
-            {
-                "Hotel": h["name"],
-                "Stars": "★" * h["stars"],
-                "Rating": f"{h['rating']}/10 ({h['review_count']} reviews)",
-                "Per night": f"£{h['price_per_night_gbp']:.2f}",
-                f"Total ({nights}n)": f"£{h['total_price_gbp']:.2f}",
-                "Distance": f"{h['distance_from_centre_km']} km",
-                "Amenities": ", ".join(h["amenities"][:3]),
-            }
+        columns = ["Hotel", "Stars", "Rating", "Per night", f"Total ({nights}n)", "Distance", "Amenities", "Reason"]
+        rows = [
+            [
+                h["name"],
+                "★" * h["stars"],
+                f"{h['rating']}/10 ({h['review_count']} reviews)",
+                f"£{h['price_per_night_gbp']:.2f}",
+                f"£{h['total_price_gbp']:.2f}",
+                f"{h['distance_from_centre_km']} km",
+                ", ".join(h["amenities"][:3]),
+                h.get("reason", "—"),
+            ]
             for h in hotels
         ]
 
@@ -104,11 +122,18 @@ class HotelSpecialist(BaseSpecialist):
 
         return StructuredResponse(
             agent=self.name,
-            responseType=ResponseType.entity_list,
+            responseType="entity_list",
             status="success",
             blocks=[
-                {"type": "text", "content": summary},
-                {"type": "table", "columns": list(table_rows[0].keys()), "rows": table_rows},
+                text_block(summary),
+                ContentBlock(
+                    type="table",
+                    content=TableContent(
+                        title=f"Hotels in {location}",
+                        columns=[TableColumn(name=c) for c in columns],
+                        rows=rows,
+                    ),
+                ),
             ],
             payload={"hotels": hotels, "sort_by": sort_by, "nights": nights},
             followUps=[

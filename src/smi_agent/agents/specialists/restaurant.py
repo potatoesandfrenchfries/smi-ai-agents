@@ -6,7 +6,14 @@ import json
 import logging
 from typing import Any
 
-from smi_agent.agents.response import ResponseType, StructuredResponse
+from smi_agent.agents.response import (
+    ContentBlock,
+    StructuredResponse,
+    TableColumn,
+    TableContent,
+    error_block,
+    text_block,
+)
 from smi_agent.agents.specialists.base import BaseSpecialist
 from smi_agent.streaming import StepEmitter
 
@@ -15,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 class RestaurantSpecialist(BaseSpecialist):
     """Finds and ranks restaurants near a location based on rating, price, or cuisine match."""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        """Accepts (and ignores) AgentRegistry's shared-client kwargs — see
+        FlightSpecialist.__init__ for why."""
 
     @property
     def name(self) -> str:
@@ -51,19 +62,24 @@ class RestaurantSpecialist(BaseSpecialist):
         )
 
         try:
+            from smi_agent.providers.explain import annotate_reasons
+
             restaurants = await get_restaurant_provider().search(
                 location=location,
                 cuisine=cuisine,
                 sort_by=sort_by,
+            )
+            restaurants = annotate_reasons(
+                restaurants, sort_by=sort_by, price_field="avg_spend_per_person_gbp", rating_field="rating",
             )
         except Exception as exc:
             logger.exception("RestaurantSpecialist: restaurant provider search failed")
             await step_emitter.emit("restaurant_search", "failed", str(exc))
             return StructuredResponse(
                 agent=self.name,
-                responseType=ResponseType.error,
+                responseType="error",
                 status="error",
-                blocks=[{"type": "error", "message": f"Restaurant search failed: {exc}"}],
+                blocks=[error_block("Restaurant search failed", str(exc))],
             )
 
         await step_emitter.emit(
@@ -73,26 +89,27 @@ class RestaurantSpecialist(BaseSpecialist):
         if not restaurants:
             return StructuredResponse(
                 agent=self.name,
-                responseType=ResponseType.entity_list,
+                responseType="entity_list",
                 status="no_data",
-                blocks=[{
-                    "type": "text",
-                    "content": f"No restaurants found in {location}"
-                               + (f" matching '{cuisine}'" if cuisine else "")
-                               + ". Try broadening the cuisine filter or searching a wider area.",
-                }],
+                blocks=[text_block(
+                    f"No restaurants found in {location}"
+                    + (f" matching '{cuisine}'" if cuisine else "")
+                    + ". Try broadening the cuisine filter or searching a wider area."
+                )],
             )
 
-        table_rows = [
-            {
-                "Restaurant": r["name"],
-                "Cuisine": r["cuisine"],
-                "Rating": f"{r['rating']}/10" if r.get("rating") else "—",
-                "Price": r["price_band"],
-                "Avg/person": f"£{r['avg_spend_per_person_gbp']}" if r.get("avg_spend_per_person_gbp") else "—",
-                "Distance": f"{r['distance_from_location_km']} km" if r.get("distance_from_location_km") else "—",
-                "Highlight": r.get("highlight", ""),
-            }
+        columns = ["Restaurant", "Cuisine", "Rating", "Price", "Avg/person", "Distance", "Highlight", "Reason"]
+        rows = [
+            [
+                r["name"],
+                r["cuisine"],
+                f"{r['rating']}/10" if r.get("rating") else "—",
+                r["price_band"],
+                f"£{r['avg_spend_per_person_gbp']}" if r.get("avg_spend_per_person_gbp") else "—",
+                f"{r['distance_from_location_km']} km" if r.get("distance_from_location_km") else "—",
+                r.get("highlight", ""),
+                r.get("reason", "—"),
+            ]
             for r in restaurants
         ]
 
@@ -114,11 +131,18 @@ class RestaurantSpecialist(BaseSpecialist):
 
         return StructuredResponse(
             agent=self.name,
-            responseType=ResponseType.entity_list,
+            responseType="entity_list",
             status="success",
             blocks=[
-                {"type": "text", "content": summary},
-                {"type": "table", "columns": list(table_rows[0].keys()), "rows": table_rows},
+                text_block(summary),
+                ContentBlock(
+                    type="table",
+                    content=TableContent(
+                        title=f"Restaurants in {location}",
+                        columns=[TableColumn(name=c) for c in columns],
+                        rows=rows,
+                    ),
+                ),
             ],
             payload={"restaurants": restaurants, "sort_by": sort_by},
             followUps=follow_ups,

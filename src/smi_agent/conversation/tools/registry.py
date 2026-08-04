@@ -18,12 +18,16 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from smi_agent.agents.specialists.base import BaseSpecialist
 from smi_agent.domain.registry import DomainRegistry
 from smi_agent.neo4j_client.safe_executor import SafeCypherExecutor
 from smi_agent.neo4j_client.templates import TemplateLoader
+from smi_agent.observability.logging import get_planner_trace_logger
 from smi_agent.postgres_client.safe_executor import SafePostgresExecutor
+from smi_agent.streaming import NullStepEmitter, StepEmitter
 
 logger = logging.getLogger(__name__)
+trace_logger = get_planner_trace_logger()
 
 # Max characters for a single tool result (protects LLM context window)
 _MAX_RESULT_CHARS = 4000
@@ -47,6 +51,13 @@ class ToolRegistry:
         postgres_executor: SafePostgresExecutor for Postgres queries.
         template_loader: Loads Cypher template metadata for parameter schemas.
         enabled_tools: Allowlist of tool names. Empty = all allowed by executors.
+        specialists: Sibling specialist agents to expose as ask_<name> tools —
+            this is what lets a coordinator agent (e.g. the "planner"
+            specialist) dynamically decide which specialists to delegate to,
+            instead of a fixed pipeline deciding for it.
+        specialist_context: Context dict forwarded to each delegated
+            specialist's run() (tenant_id, entity_id, etc).
+        step_emitter: Forwarded to delegated specialists for SSE step events.
     """
 
     def __init__(
@@ -57,6 +68,9 @@ class ToolRegistry:
         enabled_tools: list[str] | None = None,
         default_args: dict[str, str] | None = None,
         redis_client: Any | None = None,
+        specialists: list[BaseSpecialist] | None = None,
+        specialist_context: dict[str, Any] | None = None,
+        step_emitter: StepEmitter | None = None,
     ) -> None:
         self._cypher = cypher_executor
         self._pg = postgres_executor
@@ -64,9 +78,13 @@ class ToolRegistry:
         self._enabled = set(enabled_tools) if enabled_tools else None
         self._default_args = default_args or {}
         self._redis = redis_client
+        self._specialists: dict[str, BaseSpecialist] = {s.name: s for s in (specialists or [])}
+        self._specialist_context = specialist_context or {}
+        self._step_emitter = step_emitter or NullStepEmitter()
         self._builtin_tools: dict[str, dict] = {}
         self._cypher_tools: dict[str, dict] = {}
         self._pg_tools: dict[str, dict] = {}
+        self._specialist_tools: dict[str, dict] = {}
         self._build()
 
     def _build(self) -> None:
@@ -123,13 +141,30 @@ class ToolRegistry:
                 else:
                     self._pg_tools[qname] = _postgres_to_tool_def(qname, query)
 
+        # Sibling specialists, exposed as ask_<name> tools
+        for spec_name, specialist in self._specialists.items():
+            tool_name = f"ask_{spec_name}"
+            if self._enabled and tool_name not in self._enabled:
+                continue
+            self._specialist_tools[tool_name] = specialist.as_tool_definition()
+
     def openai_tool_definitions(self) -> list[dict[str, Any]]:
         """Return OpenAI function-calling tool definitions."""
-        return list(self._builtin_tools.values()) + list(self._cypher_tools.values()) + list(self._pg_tools.values())
+        return (
+            list(self._builtin_tools.values())
+            + list(self._cypher_tools.values())
+            + list(self._pg_tools.values())
+            + list(self._specialist_tools.values())
+        )
 
     def tool_names(self) -> list[str]:
         """Return names of all available tools."""
-        return list(self._builtin_tools.keys()) + list(self._cypher_tools.keys()) + list(self._pg_tools.keys())
+        return (
+            list(self._builtin_tools.keys())
+            + list(self._cypher_tools.keys())
+            + list(self._pg_tools.keys())
+            + list(self._specialist_tools.keys())
+        )
 
     async def execute(self, tool_call: dict[str, Any]) -> ToolResult:
         """Execute a single tool call. Returns structured result."""
@@ -160,6 +195,8 @@ class ToolRegistry:
             return await self._execute_cypher(call_id, name, args)
         if name in self._pg_tools and self._pg:
             return await self._execute_postgres(call_id, name, args)
+        if name in self._specialist_tools:
+            return await self._execute_specialist(call_id, name, args)
 
         return ToolResult(
             tool_call_id=call_id,
@@ -254,6 +291,52 @@ class ToolRegistry:
                 content=f"Query failed: {type(exc).__name__}: {exc}",
                 success=False,
             )
+
+    async def _execute_specialist(
+        self, call_id: str, name: str, args: dict[str, Any]
+    ) -> ToolResult:
+        """Delegate a tool call to a sibling specialist (dynamic planner path).
+
+        This is the actual "which agent to invoke" decision point: the calling
+        agent's LLM chose this tool over the others, so every call here is
+        logged to the planner trace log with the query and outcome.
+        """
+        spec_name = name.removeprefix("ask_")
+        specialist = self._specialists.get(spec_name)
+        query = args.get("query", "")
+
+        if specialist is None:
+            trace_logger.warning("DELEGATE -> %s: not found (args=%s)", spec_name, args)
+            return ToolResult(
+                tool_call_id=call_id, name=name,
+                content=f"Unknown specialist: {spec_name}", success=False,
+            )
+
+        trace_logger.info("DELEGATE -> specialist=%s query=%r", spec_name, query[:160])
+        try:
+            response = await specialist.run(query, self._specialist_context, self._step_emitter)
+        except Exception as exc:
+            logger.exception("Specialist %s failed", spec_name)
+            trace_logger.warning("DELEGATE <- specialist=%s FAILED: %s", spec_name, exc)
+            return ToolResult(
+                tool_call_id=call_id, name=name,
+                content=f"Specialist {spec_name} failed: {exc}", success=False,
+            )
+
+        trace_logger.info(
+            "DELEGATE <- specialist=%s status=%s blocks=%d",
+            spec_name, response.status, len(response.blocks),
+        )
+
+        result_payload = {"status": response.status, "payload": response.payload}
+        result_json = json.dumps(result_payload, default=str)
+        if len(result_json) > _MAX_RESULT_CHARS:
+            result_json = result_json[:_MAX_RESULT_CHARS] + "...[truncated]"
+
+        return ToolResult(
+            tool_call_id=call_id, name=name, content=result_json,
+            success=response.status != "error",
+        )
 
 
 # ── Helper: Cypher template → OpenAI tool definition ─────────────────────────

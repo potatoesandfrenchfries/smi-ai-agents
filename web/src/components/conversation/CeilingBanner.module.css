@@ -1,0 +1,19 @@
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  font-size: 12px;
+  border-bottom: 1px solid var(--ink-line);
+  background: var(--amber-dim);
+  color: var(--ink-text);
+}
+.banner[data-status="exceeded"] {
+  background: var(--red-dim);
+}
+.usage {
+  font-family: var(--font-mono);
+  color: var(--ink-text-dim);
+  flex-shrink: 0;
+}

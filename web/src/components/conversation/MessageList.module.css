@@ -1,0 +1,72 @@
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.empty {
+  margin: auto;
+  max-width: 320px;
+  text-align: center;
+  color: var(--ink-text-dim);
+}
+.emptyHint {
+  font-size: 13px;
+  margin-top: var(--space-2);
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 640px;
+}
+.row[data-role="user"] {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.roleLabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-text-dim);
+  padding: 0 var(--space-1);
+}
+
+.bubble {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--ink-raised);
+  border: 1px solid var(--ink-line);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.row[data-role="user"] .bubble {
+  background: var(--teal-dim);
+  border-color: color-mix(in srgb, var(--teal) 30%, var(--ink-line));
+}
+
+.blocks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  background: var(--teal);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}

@@ -1,0 +1,52 @@
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--ink-line);
+  background: var(--ink-raised);
+}
+
+.input {
+  flex: 1;
+  resize: none;
+  min-height: 22px;
+  max-height: 160px;
+  background: var(--ink);
+  border: 1px solid var(--ink-line);
+  border-radius: var(--radius-md);
+  color: var(--ink-text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  padding: var(--space-3) var(--space-4);
+  line-height: 1.5;
+  transition: border-color 0.15s var(--ease-out);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--teal);
+}
+.input::placeholder {
+  color: var(--ink-text-dim);
+}
+.input:disabled {
+  opacity: 0.5;
+}
+
+.send {
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--teal);
+  color: var(--ink);
+  font-weight: 600;
+  padding: var(--space-3) var(--space-5);
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.send:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.send:not(:disabled):hover {
+  opacity: 0.88;
+}

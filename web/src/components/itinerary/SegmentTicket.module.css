@@ -1,0 +1,186 @@
+.ticket {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 0 148px;
+  background: var(--paper-raised);
+  border: 1px solid var(--paper-line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  color: var(--paper-text);
+  overflow: visible;
+}
+
+.main {
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kindRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.kindLabel {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--paper-text-dim);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 600;
+  font-variation-settings: "opsz" 24;
+  margin: 0;
+  color: var(--paper-text);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--paper-text-dim);
+}
+
+.footer {
+  margin-top: auto;
+  padding-top: var(--space-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.provider {
+  font-size: 11px;
+  color: var(--paper-text-dim);
+}
+
+.swapButton {
+  border: none;
+  background: none;
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.swapButton:hover {
+  color: color-mix(in srgb, var(--teal) 80%, black);
+}
+
+/* ── The perforated tear between segment and provenance stub ────────────── */
+.perforation {
+  position: relative;
+  width: 0;
+}
+.perforation::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: -1px;
+  border-left: 2px dashed var(--paper-line);
+}
+.notchTop, .notchBottom {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--paper);
+  left: -8px;
+  border: 1px solid var(--paper-line);
+}
+.notchTop { top: -9px; }
+.notchBottom { bottom: -9px; }
+
+.stub {
+  padding: var(--space-4) var(--space-4) var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+
+.amount {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--paper-text);
+  margin-bottom: 2px;
+}
+
+.stubMeta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--paper-text-dim);
+  gap: var(--space-2);
+}
+
+.stubLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.snapshotId {
+  color: var(--teal);
+}
+
+.barcode {
+  margin-top: auto;
+  height: 18px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--paper-text) 0px,
+    var(--paper-text) 2px,
+    transparent 2px,
+    transparent 4px,
+    var(--paper-text) 4px,
+    var(--paper-text) 5px,
+    transparent 5px,
+    transparent 8px
+  );
+  opacity: 0.55;
+}
+
+@media (max-width: 720px) {
+  .ticket {
+    grid-template-columns: 1fr;
+  }
+  .perforation {
+    width: auto;
+    height: 0;
+  }
+  .perforation::before {
+    top: -1px;
+    bottom: auto;
+    left: 12px;
+    right: 12px;
+    border-left: none;
+    border-top: 2px dashed var(--paper-line);
+  }
+  .notchTop, .notchBottom {
+    top: -8px;
+    width: 16px;
+    height: 16px;
+  }
+  .notchTop { left: -8px; }
+  .notchBottom { left: auto; right: -8px; bottom: auto; }
+  .stub {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .barcode {
+    display: none;
+  }
+}

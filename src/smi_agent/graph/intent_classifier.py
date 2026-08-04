@@ -25,12 +25,15 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
+
+from smi_agent.observability.logging import get_planner_trace_logger
 
 logger = logging.getLogger(__name__)
+trace_logger = get_planner_trace_logger()
 
 
-class Intent(str, Enum):
+class Intent(StrEnum):
     GENERATE_ITINERARY = "generate_itinerary"
     MODIFY_ITINERARY = "modify_itinerary"
     FLIGHT_SEARCH = "flight_search"
@@ -101,16 +104,29 @@ class IntentClassifierAgent:
         """
         result = await self._llm_classify(raw_goal)
         if result is None:
-            return _keyword_classify(raw_goal)
+            fallback = _keyword_classify(raw_goal)
+            trace_logger.info(
+                "INTENT goal=%r -> intent=%s confidence=%.2f (keyword fallback: %s)",
+                raw_goal[:160], fallback.intent.value, fallback.confidence, fallback.reasoning,
+            )
+            return fallback
         if result.confidence < _MIN_CONFIDENCE:
             logger.info(
                 "[%s] low confidence (%.2f) for intent=%s — defaulting to generate_itinerary",
                 self.name, result.confidence, result.intent.value,
             )
+            trace_logger.info(
+                "INTENT goal=%r -> intent=%s confidence=%.2f -> defaulted to generate_itinerary (low confidence)",
+                raw_goal[:160], result.intent.value, result.confidence,
+            )
             return IntentResult(
                 Intent.GENERATE_ITINERARY, result.confidence,
                 f"Low-confidence classification ({result.intent.value}) defaulted to generate_itinerary",
             )
+        trace_logger.info(
+            "INTENT goal=%r -> intent=%s confidence=%.2f reasoning=%s",
+            raw_goal[:160], result.intent.value, result.confidence, result.reasoning,
+        )
         return result
 
     async def _llm_classify(self, raw_goal: str) -> IntentResult | None:

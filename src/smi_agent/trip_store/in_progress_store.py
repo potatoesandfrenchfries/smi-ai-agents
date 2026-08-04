@@ -17,7 +17,7 @@ import asyncio
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _DEFAULT_DIR = "data/in_progress_plans"
@@ -32,7 +32,7 @@ class InProgressPlan:
     raw_goal: str
     origin: str
     destination: str
-    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class InProgressPlanStore:

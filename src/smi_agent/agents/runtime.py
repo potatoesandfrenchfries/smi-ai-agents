@@ -36,9 +36,11 @@ from smi_agent.agents.response import (
 from smi_agent.conversation.tools.registry import ToolRegistry
 from smi_agent.domain.registry import DomainRegistry
 from smi_agent.llm.router import LLMRouter
+from smi_agent.observability.logging import get_planner_trace_logger
 from smi_agent.streaming import NullStepEmitter, StepEmitter
 
 logger = logging.getLogger(__name__)
+trace_logger = get_planner_trace_logger()
 
 # Derive valid response types from the Literal — single source of truth
 _VALID_RESPONSE_TYPES: set[str] = set(get_args(ResponseType))
@@ -125,6 +127,10 @@ class AgentRuntime:
         total_cost = 0.0
 
         logger.info("[%s] START query=%r tools=%d", self._name, user_message[:120], len(tools))
+        trace_logger.info(
+            "[%s] START query=%r available_tools=%s",
+            self._name, user_message[:120], self._registry.tool_names(),
+        )
 
         # Build messages
         messages: list[dict[str, Any]] = [
@@ -168,6 +174,7 @@ class AgentRuntime:
             # No tool calls → LLM wants to respond
             if not result.tool_calls:
                 logger.info("[%s] iter=%d LLM chose to respond (no tool calls)", self._name, iteration)
+                trace_logger.info("[%s] iter=%d -> respond directly (no further tool calls)", self._name, iteration)
                 break
 
             # Execute tool calls
@@ -180,6 +187,7 @@ class AgentRuntime:
 
             tool_names_this_iter = [tc.get("function", {}).get("name", "?") for tc in result.tool_calls]
             logger.info("[%s] iter=%d LLM called tools: %s", self._name, iteration, tool_names_this_iter)
+            trace_logger.info("[%s] iter=%d LLM selected tool(s): %s", self._name, iteration, tool_names_this_iter)
 
             for tc in result.tool_calls:
                 tool_name = tc.get("function", {}).get("name", "unknown")

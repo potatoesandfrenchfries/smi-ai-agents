@@ -1,0 +1,37 @@
+name: uc02_conversation
+version: "1.0"
+description: >
+  General-purpose conversational assistant behind the hosted web console
+  (/api/v1/conversations). Default agent for ChatRequest.agent_name and
+  CreateConversationRequest.agentName — every conversation created without
+  an explicit agentName resolves here, so this file existing at all is a
+  precondition for the conversation API to boot (SMI_CONVERSATION_AGENT_NAME
+  defaults to this name in api/app.py).
+
+output_schema_variant: minimal_v1
+runtime_profile: conversation
+
+llm:
+  lane: middle                                # -> claude-haiku-4-5-20251001 (every lane is pinned to Haiku, see llm/providers.py)
+  temperature: 0.3
+  max_tokens_per_call: 2000
+  prompt_templates_dir: "prompts/uc02_conversation"
+
+# Off for the seed default: the generic ReAct loop needs a ToolRegistry
+# allowlist (graph templates and/or SQL queries) wired up per domain first.
+# Flip to true once a domain (e.g. examples/travel) registers conversation
+# tools it wants this agent to call mid-turn.
+tool_calling:
+  enabled: false
+
+conversation:
+  max_history_turns: 20
+  compaction_threshold_pct: 80.0
+  ceiling_max_messages: 100
+  ceiling_max_tokens: 200000
+  session_ttl_seconds: 604800
+  persist_to_postgres: true
+
+observability:
+  langfuse_session_tag: uc02_conversation
+  log_level: INFO

@@ -326,6 +326,53 @@ async def parse_intent(state: ItineraryState) -> dict:
 
 
 # ── Stage 4 · search_business_specialists / search_leisure_specialists ───────
+#
+# Both paths are staged as a real agent-to-agent pipeline (FR-ORC-4), not a
+# flat fan-out: the flight specialist resolves first and its arrival time is
+# handed to the hotel specialist; the resolved hotel is then handed to
+# restaurant (and, on the leisure path, attraction) search. Each downstream
+# agent genuinely consumes the upstream agent's output — this is not an
+# orchestrator diffing results after the fact.
+
+_STANDARD_CHECKIN_HOUR = 14
+_LATE_ARRIVAL_HOUR = 22
+
+
+def checkin_feasibility_note(flight_arrival: str | None) -> str | None:
+    """Cross-segment feasibility check: flag when the flight's actual arrival
+    time makes standard hotel check-in awkward. Uses the arrival time the
+    flight specialist resolved (real agent-to-agent data), so it's None
+    whenever no flight has been resolved yet.
+
+    Public so both this graph's run_hotel_search and the Temporal-activity
+    path (_generate_itinerary in activities/travel_activities.py) share one
+    wording instead of duplicating the logic.
+    """
+    if not flight_arrival:
+        return None
+    try:
+        arrival_dt = datetime.fromisoformat(flight_arrival)
+    except ValueError:
+        return None
+    if arrival_dt.hour < _STANDARD_CHECKIN_HOUR:
+        return (
+            f"Flight arrives {arrival_dt.strftime('%H:%M')}, before standard "
+            f"{_STANDARD_CHECKIN_HOUR}:00 check-in — early check-in or luggage storage may be needed"
+        )
+    if arrival_dt.hour >= _LATE_ARRIVAL_HOUR:
+        return f"Flight arrives {arrival_dt.strftime('%H:%M')} — confirm 24-hour reception with the hotel"
+    return None
+
+
+def near_hotel_note(hotel_name: str | None) -> str | None:
+    """Real location handoff: restaurant/attraction search has no precise
+    geocoded radius, but can at least tell the traveler which resolved hotel
+    the results should be convenient to.
+    """
+    if not hotel_name:
+        return None
+    return f"Selected without a precise radius filter — treat as convenient to {hotel_name}"
+
 
 def _reused_replies(state: ItineraryState, names: tuple[str, ...]) -> dict[str, TaskReply]:
     """Specialist replies already present in state — e.g. pre-fetched by
@@ -342,241 +389,28 @@ def _reused_replies(state: ItineraryState, names: tuple[str, ...]) -> dict[str, 
     return reused
 
 
-async def _dispatch(
-    state: ItineraryState,
-    node_name: str,
-    task_requests: dict[str, TaskRequest],
-    coros: dict[str, Any],
-) -> dict:
-    """Shared fan-out/merge logic for the business and leisure specialist nodes.
+def _best_field(reply: TaskReply, field: str) -> Any | None:
+    """The top candidate's value for `field`, or None with no candidates.
 
-    Runs every named coroutine concurrently via asyncio.gather (FR-ORC-1) so
-    total latency tracks the slowest specialist, not the sum. Failures are
-    isolated per-specialist (FR-ORC-5) rather than failing the whole node.
+    Used to hand one agent's actual resolved output to the next agent in the
+    pipeline (e.g. the flight specialist's arrival time to the hotel
+    specialist) — real inter-agent data sharing (FR-ORC-4).
     """
-    emitter = _emitter(state)
-
-    plan_graph = dict(state.get("plan_graph") or {})
-    plan_graph["dispatched_at"] = datetime.utcnow().isoformat()
-    plan_graph["tasks"] = {name: req["task_id"] for name, req in task_requests.items()}
-
-    names = list(coros.keys())
-    results = await asyncio.gather(*coros.values(), return_exceptions=True)
-
-    errors: list[str] = list(state.get("errors") or [])
-    replies = {name: _handle_result(result, name, errors) for name, result in zip(names, results)}
-
-    plan_graph["stages"] = plan_graph.get("stages", []) + [node_name]
-    plan_graph["completed_at"] = datetime.utcnow().isoformat()
-
-    await emitter.emit(
-        node_name, "completed",
-        ", ".join(f"{name.title()}: {len(reply['candidates'])}" for name, reply in replies.items())
-    )
-
-    out: dict[str, Any] = {f"{name}_reply": reply for name, reply in replies.items()}
-    out.update({"plan_graph": plan_graph, "errors": errors, "current_node": node_name})
-    return out
+    candidates = reply.get("candidates") or []
+    return candidates[0].get(field) if candidates else None
 
 
-async def search_business_specialists(state: ItineraryState) -> dict:
-    """Business path (FR-ORC-1): flights ranked by schedule, hotels ranked by
-    proximity to the business location, restaurants filtered to business-friendly
-    options. No attraction specialist is invoked — sightseeing is out of scope
-    for a business trip (only the required agents run, per-path).
+async def _run_one(coro: Any, name: str, errors: list[str]) -> TaskReply:
+    """Await a single specialist coroutine outside of asyncio.gather — used
+    for the sequential legs of the A2A pipeline — isolating its failure the
+    same way _handle_result isolates a gathered one (FR-ORC-5).
     """
-    emitter = _emitter(state)
-    constraints = state["constraints"]
-    plan_id = state["plan_id"]
-
-    reused = _reused_replies(state, ("flight", "hotel", "restaurant"))
-
-    task_requests: dict[str, TaskRequest] = {}
-    coros: dict[str, Any] = {}
-
-    if "flight_reply" not in reused:
-        flight_task = _make_task_request(
-            goal=f"Find schedule-priority flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["flight"] = flight_task
-        coros["flight"] = run_flight_search(flight_task, constraints, sort_override="time")
-
-    if "hotel_reply" not in reused:
-        hotel_task = _make_task_request(
-            goal=f"Find hotels near the business location in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["hotel"] = hotel_task
-        coros["hotel"] = run_hotel_search(hotel_task, constraints, sort_override="proximity", business_only=True)
-
-    if "restaurant_reply" not in reused:
-        restaurant_task = _make_task_request(
-            goal=f"Find business-friendly restaurants near {constraints['destination']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["restaurant"] = restaurant_task
-        coros["restaurant"] = run_restaurant_search(restaurant_task, constraints, business_only=True)
-
-    if not coros:
-        await emitter.emit("search_business_specialists", "completed", "All specialist results reused from pre-fetch")
-        plan_graph = dict(state.get("plan_graph") or {})
-        plan_graph["stages"] = plan_graph.get("stages", []) + ["search_business_specialists"]
-        return {**reused, "plan_graph": plan_graph, "current_node": "search_business_specialists"}
-
-    if reused:
-        await emitter.emit(
-            "search_business_specialists", "in_progress",
-            f"Reusing pre-fetched {', '.join(n.removesuffix('_reply') for n in reused)}; "
-            f"fetching {', '.join(coros)}..."
-        )
-    else:
-        await emitter.emit(
-            "search_business_specialists", "in_progress",
-            "Dispatching schedule-priority flights, proximity hotels, and business-friendly restaurants..."
-        )
-
-    result = await _dispatch(state, "search_business_specialists", task_requests, coros)
-    result.update(reused)
-    return result
-
-
-async def search_leisure_specialists(state: ItineraryState) -> dict:
-    """Leisure path (FR-ORC-1): flights/hotels ranked by the traveler's stated
-    style and budget (sort_preference), plus restaurants and — unique to this
-    path — a tourist attraction/experience specialist for sightseeing.
-    """
-    emitter = _emitter(state)
-    constraints = state["constraints"]
-    plan_id = state["plan_id"]
-
-    reused = _reused_replies(state, ("flight", "hotel", "restaurant", "attraction"))
-
-    task_requests: dict[str, TaskRequest] = {}
-    coros: dict[str, Any] = {}
-
-    if "flight_reply" not in reused:
-        flight_task = _make_task_request(
-            goal=f"Find flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["flight"] = flight_task
-        coros["flight"] = run_flight_search(flight_task, constraints)
-
-    if "hotel_reply" not in reused:
-        hotel_task = _make_task_request(
-            goal=f"Find hotels in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["hotel"] = hotel_task
-        coros["hotel"] = run_hotel_search(hotel_task, constraints)
-
-    if "restaurant_reply" not in reused:
-        restaurant_task = _make_task_request(
-            goal=f"Find restaurants in {constraints['destination']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["restaurant"] = restaurant_task
-        coros["restaurant"] = run_restaurant_search(restaurant_task, constraints)
-
-    if "attraction_reply" not in reused:
-        attraction_task = _make_task_request(
-            goal=f"Find tourist attractions and experiences in {constraints['destination']}",
-            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
-        )
-        task_requests["attraction"] = attraction_task
-        coros["attraction"] = run_attraction_search(attraction_task, constraints)
-
-    if not coros:
-        await emitter.emit("search_leisure_specialists", "completed", "All specialist results reused from pre-fetch")
-        plan_graph = dict(state.get("plan_graph") or {})
-        plan_graph["stages"] = plan_graph.get("stages", []) + ["search_leisure_specialists"]
-        return {**reused, "plan_graph": plan_graph, "current_node": "search_leisure_specialists"}
-
-    if reused:
-        await emitter.emit(
-            "search_leisure_specialists", "in_progress",
-            f"Reusing pre-fetched {', '.join(n.removesuffix('_reply') for n in reused)}; "
-            f"fetching {', '.join(coros)}..."
-        )
-    else:
-        await emitter.emit(
-            "search_leisure_specialists", "in_progress",
-            "Dispatching flight, hotel, restaurant, and attraction searches in parallel..."
-        )
-
-    result = await _dispatch(state, "search_leisure_specialists", task_requests, coros)
-    result.update(reused)
-    return result
-
-
-async def run_flight_search(
-    task: TaskRequest, constraints: TripConstraints, sort_override: str | None = None,
-) -> TaskReply:
-    from smi_agent.examples.travel.tools.location_resolver import to_iata
-    from smi_agent.providers.registry import get_flight_provider
-    sort_by = sort_override or constraints.get("sort_preference", "cost")
-    results = await get_flight_provider().search(
-        origin=to_iata(constraints["origin"] or ""),
-        destination=to_iata(constraints["destination"] or ""),
-        date=constraints["check_in"] or "",
-        sort_by=sort_by,
-    )
-    assumptions = ["Economy class assumed if not specified"]
-    if sort_override == "time":
-        assumptions.append("Ranked by shortest journey time as a schedule-priority proxy — no meeting time was supplied")
-    return _candidates_to_reply(results, assumptions=assumptions)
-
-
-async def run_hotel_search(
-    task: TaskRequest,
-    constraints: TripConstraints,
-    sort_override: str | None = None,
-    business_only: bool = False,
-) -> TaskReply:
-    from smi_agent.examples.travel.tools.location_resolver import to_city_name
-    from smi_agent.providers.registry import get_hotel_provider
-    sort_by = sort_override or ("rating" if constraints.get("sort_preference") == "comfort" else "price")
-    results = await get_hotel_provider().search(
-        location=to_city_name(constraints["destination"] or ""),
-        check_in=constraints["check_in"] or "",
-        check_out=constraints["check_out"] or "",
-        sort_by=sort_by,
-    )
-    assumptions = ["Double room assumed if not specified"]
-    if business_only:
-        filtered = [h for h in results if BUSINESS_AMENITIES & set(h.get("amenities", []))]
-        if filtered:
-            results = filtered
-            assumptions.append("Filtered to hotels offering business amenities (business centre / wifi / concierge)")
-        else:
-            assumptions.append("No hotels matched business amenities — falling back to proximity ranking")
-    return _candidates_to_reply(results, assumptions=assumptions)
-
-
-async def run_restaurant_search(
-    task: TaskRequest, constraints: TripConstraints, business_only: bool = False,
-) -> TaskReply:
-    from smi_agent.examples.travel.tools.location_resolver import to_city_name
-    from smi_agent.providers.registry import get_restaurant_provider
-    results = await get_restaurant_provider().search(location=to_city_name(constraints["destination"] or ""))
-    assumptions = ["Dinner assumed if meal type not specified"]
-    if business_only:
-        filtered = [r for r in results if r.get("business_friendly")]
-        if filtered:
-            results = filtered
-            assumptions.append("Filtered to business-friendly restaurants suitable for client dining")
-        else:
-            assumptions.append("No restaurants flagged business-friendly — falling back to top-rated options")
-    return _candidates_to_reply(results, assumptions=assumptions)
-
-
-async def run_attraction_search(task: TaskRequest, constraints: TripConstraints) -> TaskReply:
-    from smi_agent.examples.travel.tools.attraction_scraper import search_attractions
-    from smi_agent.examples.travel.tools.location_resolver import to_city_name
-    sort_by = "price" if constraints.get("sort_preference") == "cost" else "rating"
-    results = await search_attractions(location=to_city_name(constraints["destination"] or ""), sort_by=sort_by)
-    return _candidates_to_reply(results, assumptions=["Half-day sightseeing pace assumed unless specified"])
+    try:
+        return await coro
+    except Exception as exc:
+        logger.error("[specialist_dispatch] %s failed: %s", name, exc)
+        errors.append(f"{name}_search: {exc}")
+        return TaskReply(status="blocked", candidates=[], assumptions=[], cost_usd=0.0, confidence=0.0, provenance=[])
 
 
 def _handle_result(result: Any, name: str, errors: list[str]) -> TaskReply:
@@ -595,13 +429,322 @@ def _handle_result(result: Any, name: str, errors: list[str]) -> TaskReply:
     return result
 
 
+async def search_business_specialists(state: ItineraryState) -> dict:
+    """Business path (FR-ORC-1): flights ranked by schedule, hotels ranked by
+    proximity to the business location, restaurants filtered to business-friendly
+    options. No attraction specialist is invoked — sightseeing is out of scope
+    for a business trip (only the required agents run, per-path).
+
+    Fully sequential (flight -> hotel -> restaurant): with only three agents
+    and each one genuinely consuming the previous agent's output, there's
+    nothing left to run concurrently.
+    """
+    emitter = _emitter(state)
+    constraints = state["constraints"]
+    plan_id = state["plan_id"]
+    errors: list[str] = list(state.get("errors") or [])
+
+    reused = _reused_replies(state, ("flight", "hotel", "restaurant"))
+    task_requests: dict[str, TaskRequest] = {}
+
+    # ── Stage 1: flight (feeds hotel below) ──────────────────────────────────
+    if "flight_reply" in reused:
+        flight_reply = reused["flight_reply"]
+    else:
+        flight_task = _make_task_request(
+            goal=f"Find schedule-priority flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["flight"] = flight_task
+        await emitter.emit("search_business_specialists", "in_progress", "Searching schedule-priority flights...")
+        flight_reply = await _run_one(
+            run_flight_search(flight_task, constraints, sort_override="time"), "flight", errors,
+        )
+
+    flight_arrival = _best_field(flight_reply, "arrival")
+
+    # ── Stage 2: hotel, receives the flight's arrival time (feeds restaurant below) ──
+    if "hotel_reply" in reused:
+        hotel_reply = reused["hotel_reply"]
+    else:
+        hotel_task = _make_task_request(
+            goal=f"Find hotels near the business location in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["hotel"] = hotel_task
+        await emitter.emit("search_business_specialists", "in_progress", "Searching proximity hotels...")
+        hotel_reply = await _run_one(
+            run_hotel_search(
+                hotel_task, constraints, sort_override="proximity", business_only=True,
+                flight_arrival=flight_arrival,
+            ),
+            "hotel", errors,
+        )
+
+    hotel_name = _best_field(hotel_reply, "name")
+
+    # ── Stage 3: restaurant, receives the resolved hotel location ────────────
+    if "restaurant_reply" in reused:
+        restaurant_reply = reused["restaurant_reply"]
+    else:
+        restaurant_task = _make_task_request(
+            goal=f"Find business-friendly restaurants near {constraints['destination']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["restaurant"] = restaurant_task
+        await emitter.emit("search_business_specialists", "in_progress", "Searching business-friendly restaurants...")
+        restaurant_reply = await _run_one(
+            run_restaurant_search(restaurant_task, constraints, business_only=True, near_hotel=hotel_name),
+            "restaurant", errors,
+        )
+
+    replies: dict[str, TaskReply] = {
+        "flight_reply": flight_reply, "hotel_reply": hotel_reply, "restaurant_reply": restaurant_reply,
+    }
+
+    plan_graph = dict(state.get("plan_graph") or {})
+    plan_graph["dispatched_at"] = plan_graph.get("dispatched_at", datetime.utcnow().isoformat())
+    plan_graph["tasks"] = {name: req["task_id"] for name, req in task_requests.items()}
+    plan_graph["stages"] = plan_graph.get("stages", []) + ["search_business_specialists"]
+    plan_graph["completed_at"] = datetime.utcnow().isoformat()
+
+    await emitter.emit(
+        "search_business_specialists", "completed",
+        ", ".join(f"{name.removesuffix('_reply').title()}: {len(reply['candidates'])}" for name, reply in replies.items())
+    )
+
+    return {**replies, "plan_graph": plan_graph, "errors": errors, "current_node": "search_business_specialists"}
+
+
+async def search_leisure_specialists(state: ItineraryState) -> dict:
+    """Leisure path (FR-ORC-1): flights/hotels ranked by the traveler's stated
+    style and budget (sort_preference), plus restaurants and — unique to this
+    path — a tourist attraction/experience specialist for sightseeing.
+
+    Staged flight -> hotel -> {restaurant, attraction}: restaurant and
+    attraction run concurrently with each other (neither depends on the
+    other), but both wait on the resolved hotel location.
+    """
+    emitter = _emitter(state)
+    constraints = state["constraints"]
+    plan_id = state["plan_id"]
+    errors: list[str] = list(state.get("errors") or [])
+
+    reused = _reused_replies(state, ("flight", "hotel", "restaurant", "attraction"))
+    task_requests: dict[str, TaskRequest] = {}
+
+    # ── Stage 1: flight (feeds hotel below) ──────────────────────────────────
+    if "flight_reply" in reused:
+        flight_reply = reused["flight_reply"]
+    else:
+        flight_task = _make_task_request(
+            goal=f"Find flights from {constraints['origin']} to {constraints['destination']} on {constraints['check_in']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["flight"] = flight_task
+        await emitter.emit("search_leisure_specialists", "in_progress", "Searching flights...")
+        flight_reply = await _run_one(run_flight_search(flight_task, constraints), "flight", errors)
+
+    flight_arrival = _best_field(flight_reply, "arrival")
+
+    # ── Stage 2: hotel, receives the flight's arrival time (feeds restaurant/attraction below) ──
+    if "hotel_reply" in reused:
+        hotel_reply = reused["hotel_reply"]
+    else:
+        hotel_task = _make_task_request(
+            goal=f"Find hotels in {constraints['destination']} from {constraints['check_in']} to {constraints['check_out']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["hotel"] = hotel_task
+        await emitter.emit("search_leisure_specialists", "in_progress", "Searching hotels...")
+        hotel_reply = await _run_one(
+            run_hotel_search(hotel_task, constraints, flight_arrival=flight_arrival), "hotel", errors,
+        )
+
+    hotel_name = _best_field(hotel_reply, "name")
+
+    # ── Stage 3: restaurant + attraction, receive the resolved hotel location ──
+    coros: dict[str, Any] = {}
+    if "restaurant_reply" not in reused:
+        restaurant_task = _make_task_request(
+            goal=f"Find restaurants in {constraints['destination']}"
+                 + (f", convenient to {hotel_name}" if hotel_name else ""),
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["restaurant"] = restaurant_task
+        coros["restaurant"] = run_restaurant_search(restaurant_task, constraints, near_hotel=hotel_name)
+
+    if "attraction_reply" not in reused:
+        attraction_task = _make_task_request(
+            goal=f"Find tourist attractions and experiences in {constraints['destination']}",
+            constraints=constraints, plan_id=plan_id, budget_usd=SUBTASK_BUDGET_USD,
+        )
+        task_requests["attraction"] = attraction_task
+        coros["attraction"] = run_attraction_search(attraction_task, constraints, near_hotel=hotel_name)
+
+    replies: dict[str, TaskReply] = dict(reused)
+    replies["flight_reply"] = flight_reply
+    replies["hotel_reply"] = hotel_reply
+
+    if coros:
+        await emitter.emit(
+            "search_leisure_specialists", "in_progress",
+            f"Searching restaurants and attractions near {hotel_name}..." if hotel_name
+            else "Searching restaurants and attractions...",
+        )
+        names = list(coros.keys())
+        results = await asyncio.gather(*coros.values(), return_exceptions=True)
+        for name, result in zip(names, results, strict=True):
+            replies[f"{name}_reply"] = _handle_result(result, name, errors)
+
+    plan_graph = dict(state.get("plan_graph") or {})
+    plan_graph["dispatched_at"] = plan_graph.get("dispatched_at", datetime.utcnow().isoformat())
+    plan_graph["tasks"] = {name: req["task_id"] for name, req in task_requests.items()}
+    plan_graph["stages"] = plan_graph.get("stages", []) + ["search_leisure_specialists"]
+    plan_graph["completed_at"] = datetime.utcnow().isoformat()
+
+    await emitter.emit(
+        "search_leisure_specialists", "completed",
+        ", ".join(f"{name.removesuffix('_reply').title()}: {len(reply['candidates'])}" for name, reply in replies.items())
+    )
+
+    return {**replies, "plan_graph": plan_graph, "errors": errors, "current_node": "search_leisure_specialists"}
+
+
+async def run_flight_search(
+    task: TaskRequest, constraints: TripConstraints, sort_override: str | None = None,
+) -> TaskReply:
+    from smi_agent.examples.travel.tools.location_resolver import to_iata
+    from smi_agent.providers.explain import annotate_reasons
+    from smi_agent.providers.registry import get_flight_provider
+    sort_by = sort_override or constraints.get("sort_preference", "cost")
+    results = await get_flight_provider().search(
+        origin=to_iata(constraints["origin"] or ""),
+        destination=to_iata(constraints["destination"] or ""),
+        date=constraints["check_in"] or "",
+        sort_by=sort_by,
+    )
+    results = annotate_reasons(results, sort_by=sort_by, price_field="price_gbp")
+    assumptions = ["Economy class assumed if not specified"]
+    if sort_override == "time":
+        assumptions.append("Ranked by shortest journey time as a schedule-priority proxy — no meeting time was supplied")
+    return _candidates_to_reply(results, assumptions=assumptions)
+
+
+async def run_hotel_search(
+    task: TaskRequest,
+    constraints: TripConstraints,
+    sort_override: str | None = None,
+    business_only: bool = False,
+    flight_arrival: str | None = None,
+) -> TaskReply:
+    from smi_agent.examples.travel.tools.location_resolver import to_city_name
+    from smi_agent.providers.explain import annotate_reasons
+    from smi_agent.providers.registry import get_hotel_provider
+    sort_by = sort_override or ("rating" if constraints.get("sort_preference") == "comfort" else "price")
+    results = await get_hotel_provider().search(
+        location=to_city_name(constraints["destination"] or ""),
+        check_in=constraints["check_in"] or "",
+        check_out=constraints["check_out"] or "",
+        sort_by=sort_by,
+    )
+    assumptions = ["Double room assumed if not specified"]
+    if business_only:
+        filtered = [h for h in results if BUSINESS_AMENITIES & set(h.get("amenities", []))]
+        if filtered:
+            results = filtered
+            assumptions.append("Filtered to hotels offering business amenities (business centre / wifi / concierge)")
+        else:
+            assumptions.append("No hotels matched business amenities — falling back to proximity ranking")
+    results = annotate_reasons(
+        results, sort_by=sort_by, price_field="total_price_gbp",
+        rating_field="rating", proximity_field="distance_from_centre_km",
+    )
+    feasibility_note = checkin_feasibility_note(flight_arrival)
+    if feasibility_note:
+        assumptions.append(feasibility_note)
+    return _candidates_to_reply(results, assumptions=assumptions)
+
+
+async def run_restaurant_search(
+    task: TaskRequest, constraints: TripConstraints, business_only: bool = False, near_hotel: str | None = None,
+) -> TaskReply:
+    from smi_agent.examples.travel.tools.location_resolver import to_city_name
+    from smi_agent.providers.explain import annotate_reasons
+    from smi_agent.providers.registry import get_restaurant_provider
+    results = await get_restaurant_provider().search(location=to_city_name(constraints["destination"] or ""))
+    assumptions = ["Dinner assumed if meal type not specified"]
+    if business_only:
+        filtered = [r for r in results if r.get("business_friendly")]
+        if filtered:
+            results = filtered
+            assumptions.append("Filtered to business-friendly restaurants suitable for client dining")
+        else:
+            assumptions.append("No restaurants flagged business-friendly — falling back to top-rated options")
+    results = annotate_reasons(results, sort_by="rating", price_field="avg_spend_per_person_gbp", rating_field="rating")
+    note = near_hotel_note(near_hotel)
+    if note:
+        assumptions.append(note)
+    return _candidates_to_reply(results, assumptions=assumptions)
+
+
+async def run_attraction_search(
+    task: TaskRequest, constraints: TripConstraints, near_hotel: str | None = None,
+) -> TaskReply:
+    from smi_agent.examples.travel.tools.attraction_scraper import search_attractions
+    from smi_agent.examples.travel.tools.location_resolver import to_city_name
+    from smi_agent.providers.explain import annotate_reasons
+    sort_by = "price" if constraints.get("sort_preference") == "cost" else "rating"
+    results = await search_attractions(location=to_city_name(constraints["destination"] or ""), sort_by=sort_by)
+    results = annotate_reasons(results, sort_by=sort_by, price_field="entry_fee_gbp", rating_field="rating")
+    assumptions = ["Half-day sightseeing pace assumed unless specified"]
+    note = near_hotel_note(near_hotel)
+    if note:
+        assumptions.append(note)
+    return _candidates_to_reply(results, assumptions=assumptions)
+
+
 # ── Stage 4 · merge_results ───────────────────────────────────────────────────
+
+def _decision_log_entries(state: ItineraryState) -> list[dict]:
+    """Decision logging (Explainable Recommendations + Decision Logging):
+    for each section, record which candidate was selected and which were
+    rejected, with the `reason` each one already carries from
+    ``providers.explain.annotate_reasons`` — the top candidate's reason
+    explains the pick, every other candidate's reason (generated relative to
+    the top pick) doubles as the rejection explanation.
+
+    Recomputed fresh every time merge_results runs (including reflect_itinerary
+    loop-backs after a candidate swap), so it always reflects the current
+    state rather than accumulating stale entries across attempts.
+    """
+    entries: list[dict] = []
+    for section in ("flight", "hotel", "restaurant", "attraction"):
+        reply = state.get(f"{section}_reply") or {}
+        candidates = reply.get("candidates") or []
+        if not candidates:
+            continue
+        selected = candidates[0]
+        entries.append({
+            "section": section,
+            "selected_id": selected.get("id"),
+            "selected_reason": selected.get("reason", ""),
+            "rejected": [
+                {"id": c.get("id"), "reason": c.get("reason", "")}
+                for c in candidates[1:]
+            ],
+        })
+    return entries
+
 
 async def merge_results(state: ItineraryState) -> dict:
     """Reconcile specialist candidates into a coherent plan.
 
-    Performs cross-segment feasibility checks — e.g., hotel check-in must be
-    plausible after the latest flight arrival (FR-ORC-4).
+    Cross-segment feasibility (e.g. hotel check-in vs. flight arrival) is
+    checked earlier, in run_hotel_search, using the arrival time handed down
+    from the flight specialist (FR-ORC-4) — by the time results reach here
+    they're already reconciled, so this only picks the best candidate per
+    segment and totals the cost.
     """
     emitter = _emitter(state)
     await emitter.emit("merge_results", "in_progress", "Reconciling candidates...")
@@ -611,7 +754,9 @@ async def merge_results(state: ItineraryState) -> dict:
     restaurant = state.get("restaurant_reply") or {}
     attraction = state.get("attraction_reply") or {}
 
-    # Cross-segment feasibility: pick best candidate per segment
+    # Best candidate per segment — candidates are already provider-ranked and
+    # explain-annotated (providers.explain.annotate_reasons), so [0] is both
+    # "the pick" and self-explaining via its own `reason` field.
     best_flight = flight.get("candidates", [{}])[0] if flight.get("candidates") else {}
     best_hotel = hotel.get("candidates", [{}])[0] if hotel.get("candidates") else {}
     best_restaurants = restaurant.get("candidates", [])[:3]
@@ -624,6 +769,8 @@ async def merge_results(state: ItineraryState) -> dict:
         sum(r.get("avg_spend_per_person_gbp") or 0 for r in best_restaurants) +
         sum(a.get("entry_fee_gbp") or 0 for a in best_attractions)
     )
+
+    decision_log = _decision_log_entries(state)
 
     plan_graph = dict(state.get("plan_graph") or {})
     plan_graph["stages"] = plan_graph.get("stages", []) + ["merge_results"]
@@ -640,6 +787,7 @@ async def merge_results(state: ItineraryState) -> dict:
     return {
         "plan_graph": plan_graph,
         "total_cost_gbp": round(total_cost, 2),
+        "decision_log": decision_log,
         "current_node": "merge_results",
     }
 
@@ -778,9 +926,24 @@ async def budget_agent(state: ItineraryState) -> dict:
     plan_graph = dict(state.get("plan_graph") or {})
     plan_graph["stages"] = plan_graph.get("stages", []) + ["budget_agent"]
 
+    # Record the breach decision itself: current combo rejected for exceeding
+    # budget, alternatives offered in its place — same decision-log shape as
+    # merge_results' per-section entries, keyed "budget" instead of a section.
+    decision_log = list(state.get("decision_log") or [])
+    decision_log.append({
+        "section": "budget",
+        "selected_id": None,
+        "selected_reason": f"Current combo (£{current_total:.2f}) exceeds budget (£{budget:.2f}) — held for approval" if budget else "Budget breach detected",
+        "rejected": [
+            {"id": None, "reason": f"{a['label']} (saves £{a['savings_gbp']:.2f})"}
+            for a in alternatives
+        ],
+    })
+
     return {
         "budget_alternatives": alternatives,
         "plan_graph": plan_graph,
+        "decision_log": decision_log,
         "current_node": "budget_agent",
     }
 
@@ -814,6 +977,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "provider": best_flight.get("airline", "TBC"),
             "summary": f"{best_flight.get('origin')} → {best_flight.get('destination')} on {best_flight.get('date')}",
             "price_gbp": best_flight.get("price_gbp"),
+            "reason": best_flight.get("reason"),
             "provenance": (flight.get("provenance") or [])[:1],
             "handoff_link": f"https://book.smartinerary.io/flight/{best_flight.get('id', 'TBC')}",
         },
@@ -823,6 +987,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "provider": best_hotel.get("name", "TBC"),
             "summary": f"{best_hotel.get('name')} — {best_hotel.get('nights')} nights",
             "price_gbp": best_hotel.get("total_price_gbp"),
+            "reason": best_hotel.get("reason"),
             "provenance": (hotel.get("provenance") or [])[:1],
             "handoff_link": f"https://book.smartinerary.io/hotel/{best_hotel.get('id', 'TBC')}",
         },
@@ -835,6 +1000,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "provider": "Sightseeing",
             "summary": ", ".join(a.get("name", "TBC") for a in best_attractions),
             "price_gbp": round(sum(a.get("entry_fee_gbp") or 0 for a in best_attractions), 2),
+            "reason": best_attractions[0].get("reason") if best_attractions else None,
             "provenance": (attraction.get("provenance") or [])[:3],
             "handoff_link": None,
         })
@@ -876,6 +1042,10 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             for reply in [flight, hotel, restaurant, attraction]
             for a in (reply.get("assumptions") or [])
         }),
+        # Decision Logging: selected vs. rejected candidates per section, with
+        # the reason each carries (providers.explain.annotate_reasons) —
+        # populated by merge_results, extended by budget_agent on a breach.
+        "decision_log": state.get("decision_log") or [],
     }
 
     plan_graph = dict(state.get("plan_graph") or {})

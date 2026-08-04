@@ -44,6 +44,13 @@ _DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 _DEFAULT_BACKUP_COUNT = 5  # 5 rotated files (50 MB total)
 _DEFAULT_BUFFER_SIZE = 8 * 1024  # 8 KB write buffer
 
+# Dedicated logger name for tracing the dynamic (Supervisor/Planner) routing
+# path: intent classification -> supervisor routing -> planner tool selection
+# -> specialist delegation -> provider search. Kept separate from the app's
+# main JSON logger so the path can be watched live, in plain text, with:
+#   tail -f logs/planner_trace.log
+_PLANNER_TRACE_LOGGER_NAME = "smi_agent.planner_trace"
+
 
 def configure_logging(
     log_level: str | None = None,
@@ -116,6 +123,19 @@ def configure_logging(
     for noisy in ("httpx", "httpcore", "neo4j", "litellm"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # Dedicated plain-text trace log for the dynamic routing path. Still
+    # propagates to the root logger (so it also appears in the normal
+    # console/JSON log), but gets its own human-readable file regardless of
+    # SMI_LOG_JSON, so it can be tailed on its own during debugging.
+    trace_logger = logging.getLogger(_PLANNER_TRACE_LOGGER_NAME)
+    trace_logger.setLevel(level)
+    trace_logger.propagate = True
+    for existing in list(trace_logger.handlers):
+        trace_logger.removeHandler(existing)
+    trace_handler = _make_planner_trace_handler(level)
+    if trace_handler:
+        trace_logger.addHandler(trace_handler)
+
 
 def _make_formatter(use_json: bool) -> logging.Formatter:
     """Create a log formatter."""
@@ -185,6 +205,48 @@ def _make_rolling_file_handler(
     buffered.setLevel(level)
 
     return buffered
+
+
+def _make_planner_trace_handler(level: int) -> logging.Handler | None:
+    """Rotating, always-plain-text handler for logs/planner_trace.log.
+
+    Returns None if the log directory cannot be created (mirrors
+    ``_make_rolling_file_handler``'s failure mode).
+    """
+    log_dir = os.environ.get("SMI_LOG_DIR", "logs")
+    try:
+        log_path = Path(log_dir)
+        log_path.mkdir(parents=True, exist_ok=True)
+        filepath = log_path / "planner_trace.log"
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Cannot create planner trace log dir %s: %s — planner_trace.log disabled",
+            log_dir, exc,
+        )
+        return None
+
+    handler = RotatingFileHandler(
+        filename=str(filepath),
+        maxBytes=_DEFAULT_MAX_BYTES,
+        backupCount=_DEFAULT_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setLevel(level)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)-5s] %(message)s", datefmt="%H:%M:%S")
+    )
+    return handler
+
+
+def get_planner_trace_logger() -> logging.Logger:
+    """Logger for the dynamic Supervisor/Planner routing path.
+
+    Every intent classification, routing choice, and specialist tool-call
+    made while handling a request through the dynamic (non-Temporal) chat
+    stack should log here, so the full decision path can be watched live in
+    one place: ``tail -f logs/planner_trace.log``.
+    """
+    return logging.getLogger(_PLANNER_TRACE_LOGGER_NAME)
 
 
 # ── Context helpers ────────────────────────────────────────────────────────────

@@ -30,9 +30,11 @@ from smi_agent.agents.response import (
 )
 from smi_agent.llm.prompts import PromptLoader
 from smi_agent.llm.router import LLMRouter
+from smi_agent.observability.logging import get_planner_trace_logger
 from smi_agent.streaming import NullStepEmitter, StepEmitter
 
 logger = logging.getLogger(__name__)
+trace_logger = get_planner_trace_logger()
 
 # Circuit breaker cooldown (seconds)
 _CIRCUIT_BREAKER_COOLDOWN = 60
@@ -70,6 +72,7 @@ class SupervisorAgent:
         emitter = step_emitter or NullStepEmitter()
 
         await emitter.emit("supervisor", "in_progress", "Analyzing your query...")
+        trace_logger.info("SUPERVISOR received message=%r", user_message[:160])
 
         # Build specialist tool definitions (skip circuit-broken ones)
         specialist_tools = []
@@ -77,6 +80,7 @@ class SupervisorAgent:
         for specialist in self._registry.all_specialists():
             if self._is_circuit_broken(specialist.name):
                 logger.info("Skipping circuit-broken specialist: %s", specialist.name)
+                trace_logger.info("SUPERVISOR skip circuit-broken specialist=%s", specialist.name)
                 continue
             specialist_tools.append(specialist.as_tool_definition())
             available_specialists.append(specialist)
@@ -138,6 +142,7 @@ class SupervisorAgent:
 
         # ── Route based on LLM decision ──────────────────────────────────
         if not result.tool_calls:
+            trace_logger.info("SUPERVISOR ROUTE -> respond directly (no tool call)")
             duration = int((time.monotonic() - start_time) * 1000)
             resp = simple_response("supervisor", result.content)
             resp.meta = ResponseMeta(durationMs=duration, modelUsed="middle")
@@ -148,6 +153,11 @@ class SupervisorAgent:
         fn_args = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
 
         logger.info("[supervisor] ROUTE fn=%s query=%r", fn_name, fn_args.get("query", user_message)[:120])
+        trace_logger.info(
+            "SUPERVISOR ROUTE -> fn=%s query=%r (candidates considered: %s)",
+            fn_name, fn_args.get("query", user_message)[:160],
+            [s.name for s in available_specialists],
+        )
 
         # Direct response (greetings, clarifications)
         if fn_name == "respond_directly":
@@ -164,6 +174,7 @@ class SupervisorAgent:
 
         if not specialist:
             logger.warning("Supervisor routed to unknown specialist: %s", specialist_name)
+            trace_logger.warning("SUPERVISOR ROUTE -> %s: specialist not registered", specialist_name)
             return simple_response(
                 "supervisor",
                 f"I tried to use the {specialist_name} specialist but it is not available.",
@@ -177,10 +188,16 @@ class SupervisorAgent:
         )
 
         # ── Execute specialist ────────────────────────────────────────────
+        trace_logger.info("SUPERVISOR DELEGATE -> specialist=%s query=%r", specialist_name, query[:160])
         try:
             response = await specialist.run(query, context, emitter)
+            trace_logger.info(
+                "SUPERVISOR DELEGATE <- specialist=%s status=%s",
+                specialist_name, response.status,
+            )
         except Exception as exc:
             logger.error("Specialist %s failed: %s", specialist_name, exc)
+            trace_logger.warning("SUPERVISOR DELEGATE <- specialist=%s FAILED: %s", specialist_name, exc)
             self._trip_circuit_breaker(specialist_name)
 
             response = StructuredResponse(
@@ -262,6 +279,10 @@ class SupervisorAgent:
 
         cooldown = min(_CIRCUIT_BREAKER_COOLDOWN * (2 ** (count - 2)), 300)
         self._circuit_breaker[name] = (time.monotonic(), cooldown, count)
+        trace_logger.warning(
+            "SUPERVISOR circuit-breaker TRIPPED specialist=%s count=%d cooldown=%ds",
+            name, count, cooldown,
+        )
         logger.warning(
             "Circuit breaker tripped for specialist: %s (count=%d, cooldown=%ds)",
             name, count, cooldown,

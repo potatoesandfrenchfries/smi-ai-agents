@@ -15,12 +15,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from smi_agent.observability.metrics import (
-    API_REQUESTS_TOTAL,
-    ERRORS_TOTAL,
-    HTTP_REQUEST_DURATION_SECONDS,
-)
-
 from smi_agent.api.conversation_runner import restore_session_from_postgres, run_conversation_turn
 from smi_agent.api.conversation_service import (
     count_active_conversations,
@@ -48,6 +42,11 @@ from smi_agent.conversation.worker import run_conversation_worker
 from smi_agent.domain.registry import DomainRegistry
 from smi_agent.neo4j_client.driver import Neo4jDriver
 from smi_agent.neo4j_client.templates import TemplateLoader
+from smi_agent.observability.metrics import (
+    API_REQUESTS_TOTAL,
+    ERRORS_TOTAL,
+    HTTP_REQUEST_DURATION_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,57 @@
+# Scrape config for the `prometheus` service in docker-compose.yml.
+#
+# Every target below already exposes a /metrics endpoint via prometheus-client
+# (see src/smi_agent/observability/metrics.py) — this file is what actually
+# collects them; without it the endpoints just sit there unscraped.
+#
+# Container-internal ports are used throughout (Prometheus runs on the same
+# compose network), not the host-mapped ports from docker-compose.yml's
+# `ports:` section — those are only for scraping/curling from the host.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: smi-api
+    static_configs:
+      - targets: ["api:8080"]
+        labels: { service: "api" }
+
+  # One target per agent microservice (smi_agent/worker.py, SMI_AGENT_QUEUE) —
+  # each is its own container, so each gets its own scrape target rather than
+  # one shared job, matching the per-agent task-queue split.
+  - job_name: smi-worker-orchestrator
+    static_configs:
+      - targets: ["worker-orchestrator:9100"]
+        labels: { service: "worker-orchestrator", queue: "smartinerary" }
+
+  - job_name: smi-worker-flight
+    static_configs:
+      - targets: ["worker-flight:9100"]
+        labels: { service: "worker-flight", queue: "flight-search" }
+
+  - job_name: smi-worker-hotel
+    static_configs:
+      - targets: ["worker-hotel:9100"]
+        labels: { service: "worker-hotel", queue: "hotel-search" }
+
+  - job_name: smi-worker-restaurant
+    static_configs:
+      - targets: ["worker-restaurant:9100"]
+        labels: { service: "worker-restaurant", queue: "restaurant-search" }
+
+  - job_name: smi-worker-attraction
+    static_configs:
+      - targets: ["worker-attraction:9100"]
+        labels: { service: "worker-attraction", queue: "attraction-search" }
+
+  - job_name: smi-worker-itinerary
+    static_configs:
+      - targets: ["worker-itinerary:9100"]
+        labels: { service: "worker-itinerary", queue: "itinerary-generation" }
+
+  - job_name: smi-worker-core
+    static_configs:
+      - targets: ["worker-core:9100"]
+        labels: { service: "worker-core", queue: "core-services" }

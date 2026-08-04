@@ -13,7 +13,14 @@ import json
 import logging
 from typing import Any
 
-from smi_agent.agents.response import ResponseType, StructuredResponse
+from smi_agent.agents.response import (
+    ContentBlock,
+    StructuredResponse,
+    TableColumn,
+    TableContent,
+    error_block,
+    text_block,
+)
 from smi_agent.agents.specialists.base import BaseSpecialist
 from smi_agent.streaming import StepEmitter
 
@@ -22,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 class FlightSpecialist(BaseSpecialist):
     """Finds and ranks available flights for a given route and date."""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        """Accepts (and ignores) AgentRegistry's shared-client kwargs
+        (neo4j_driver, template_loader, pg_client, redis_client) — this
+        specialist only depends on the flight provider registry, resolved
+        lazily in run().
+        """
 
     @property
     def name(self) -> str:
@@ -62,20 +76,23 @@ class FlightSpecialist(BaseSpecialist):
 
         # ── 2. Call the scraper tool ──────────────────────────────────────────
         try:
+            from smi_agent.providers.explain import annotate_reasons
+
             flights = await get_flight_provider().search(
                 origin=origin,
                 destination=destination,
                 date=date,
                 sort_by=sort_by,
             )
+            flights = annotate_reasons(flights, sort_by=sort_by, price_field="price_gbp")
         except Exception as exc:
             logger.exception("FlightSpecialist: flight provider search failed")
             await step_emitter.emit("flight_search", "failed", str(exc))
             return StructuredResponse(
                 agent=self.name,
-                responseType=ResponseType.error,
+                responseType="error",
                 status="error",
-                blocks=[{"type": "error", "message": f"Flight search failed: {exc}"}],
+                blocks=[error_block("Flight search failed", str(exc))],
             )
 
         await step_emitter.emit(
@@ -88,25 +105,26 @@ class FlightSpecialist(BaseSpecialist):
         if not flights:
             return StructuredResponse(
                 agent=self.name,
-                responseType=ResponseType.entity_list,
+                responseType="entity_list",
                 status="no_data",
-                blocks=[{
-                    "type": "text",
-                    "content": f"No flights found from {origin} to {destination} on {date}. "
-                               "Try adjusting the date or nearby airports.",
-                }],
+                blocks=[text_block(
+                    f"No flights found from {origin} to {destination} on {date}. "
+                    "Try adjusting the date or nearby airports."
+                )],
             )
 
-        table_rows = [
-            {
-                "Airline": f["airline"],
-                "Departure": f["departure"][11:16] if f["departure"] else "—",
-                "Arrival": f["arrival"][11:16] if f["arrival"] else "—",
-                "Duration": _fmt_duration(f.get("duration_min")),
-                "Stops": str(f.get("stops", 0)),
-                "Price (GBP)": f"£{f['price_gbp']:.2f}" if f.get("price_gbp") else "—",
-                "Seats left": str(f.get("seats_remaining") or "—"),
-            }
+        columns = ["Airline", "Departure", "Arrival", "Duration", "Stops", "Price (GBP)", "Seats left", "Reason"]
+        rows = [
+            [
+                f["airline"],
+                f["departure"][11:16] if f["departure"] else "—",
+                f["arrival"][11:16] if f["arrival"] else "—",
+                _fmt_duration(f.get("duration_min")),
+                str(f.get("stops", 0)),
+                f"£{f['price_gbp']:.2f}" if f.get("price_gbp") else "—",
+                str(f.get("seats_remaining") or "—"),
+                f.get("reason", "—"),
+            ]
             for f in flights
         ]
 
@@ -120,17 +138,24 @@ class FlightSpecialist(BaseSpecialist):
 
         return StructuredResponse(
             agent=self.name,
-            responseType=ResponseType.entity_list,
+            responseType="entity_list",
             status="success",
             blocks=[
-                {"type": "text", "content": summary},
-                {"type": "table", "columns": list(table_rows[0].keys()), "rows": table_rows},
+                text_block(summary),
+                ContentBlock(
+                    type="table",
+                    content=TableContent(
+                        title=f"Flights: {origin} → {destination}",
+                        columns=[TableColumn(name=c) for c in columns],
+                        rows=rows,
+                    ),
+                ),
             ],
             payload={"flights": flights, "sort_by": sort_by},
             followUps=[
-                f"Show me the cheapest option in detail",
-                f"Are there flights on the day before or after?",
-                f"Filter to direct flights only",
+                "Show me the cheapest option in detail",
+                "Are there flights on the day before or after?",
+                "Filter to direct flights only",
             ],
             sources=[{"tool": "search_flights", "query": json.dumps({"origin": origin, "destination": destination, "date": date})}],
         )

@@ -1,0 +1,11 @@
+Summarise the following conversation turns into a short paragraph that
+preserves every concrete fact a later turn might need: dates, cities,
+budgets, amounts, and any decision the traveler made (confirmed, rejected,
+requested a change). Do not add commentary or preamble — output only the
+summary paragraph.
+
+## Turns to summarise
+
+{% for turn in turns %}
+{{ turn.role }}: {{ turn.content }}
+{% endfor %}

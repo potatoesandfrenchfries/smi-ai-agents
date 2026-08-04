@@ -71,6 +71,14 @@ class ItineraryParams:
     hotels: list[dict] = field(default_factory=list)
     restaurants: list[dict] = field(default_factory=list)
     attractions: list[dict] = field(default_factory=list)
+    # Agent-to-agent handoff (FR-ORC-4): the flight specialist's resolved
+    # arrival time and the hotel specialist's resolved name, threaded through
+    # from ItineraryWorkflow's sequential search stage so this activity can
+    # attach the same cross-segment feasibility/location notes the graph's
+    # own run_hotel_search/run_restaurant_search would (see
+    # smi_agent.graph.itinerary_graph.checkin_feasibility_note/near_hotel_note).
+    flight_arrival: str | None = None
+    hotel_name: str | None = None
     # HITL edit re-runs (FR-PRS-2): when set, skip_reparse tells parse_intent to
     # trust resolved_constraints as-is (e.g. an edited budget_gbp) instead of
     # re-deriving everything from raw_goal, which would otherwise silently
@@ -92,6 +100,7 @@ class ItineraryResult:
     budget_alternatives: list[dict] = field(default_factory=list)  # Budget Agent output on breach
     resolved_constraints: dict = field(default_factory=dict)  # What parse_intent resolved — carried forward for HITL edits
     quality_review: dict = field(default_factory=dict)  # reflect_itinerary's critic findings
+    decision_log: list[dict] = field(default_factory=list)  # Selected vs. rejected candidates per section, with reasons
 
 
 @dataclass
@@ -215,46 +224,79 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
 
 async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
     import uuid
-    from smi_agent.graph.itinerary_graph import build_itinerary_graph
+
+    from smi_agent.graph.itinerary_graph import (
+        build_itinerary_graph,
+        checkin_feasibility_note,
+        near_hotel_note,
+    )
     from smi_agent.graph.state import TaskReply
+    from smi_agent.providers.explain import annotate_reasons
 
     activity.logger.info("Generating itinerary for plan %s", params.plan_id)
 
     graph = build_itinerary_graph()
 
+    # Explainability (per-candidate `reason`): these activities call the
+    # provider registry directly (not the graph's run_*_search wrappers), so
+    # the same annotate_reasons pass has to happen here too.
+    flight_sort_by = params.sort_by
+    hotel_sort_by = "rating" if params.sort_by == "comfort" else "price"
+    attraction_sort_by = "price" if params.sort_by == "cost" else "rating"
+
+    flights = annotate_reasons(params.flights, sort_by=flight_sort_by, price_field="price_gbp")
+    hotels = annotate_reasons(
+        params.hotels, sort_by=hotel_sort_by, price_field="total_price_gbp",
+        rating_field="rating", proximity_field="distance_from_centre_km",
+    )
+    restaurants = annotate_reasons(
+        params.restaurants, sort_by="rating", price_field="avg_spend_per_person_gbp", rating_field="rating",
+    )
+    attractions = annotate_reasons(
+        params.attractions, sort_by=attraction_sort_by, price_field="entry_fee_gbp", rating_field="rating",
+    )
+
+    # Agent-to-agent handoff (FR-ORC-4): the flight/hotel data
+    # ItineraryWorkflow resolved sequentially, surfaced as assumptions here —
+    # same wording the graph's own run_hotel_search/run_restaurant_search use.
+    hotel_assumptions = ["Double room assumed"]
+    if (note := checkin_feasibility_note(params.flight_arrival)):
+        hotel_assumptions.append(note)
+    near_hotel = near_hotel_note(params.hotel_name)
+
     # Build TaskReply envelopes from pre-fetched results so the graph can
     # merge and compile without re-running the search nodes.
     flight_reply = TaskReply(
-        status="done" if params.flights else "partial",
-        candidates=params.flights,
+        status="done" if flights else "partial",
+        candidates=flights,
         assumptions=["Economy class assumed"],
         cost_usd=0.0,
-        confidence=0.9 if params.flights else 0.4,
-        provenance=[f.get("id", str(uuid.uuid4())) for f in params.flights],
+        confidence=0.9 if flights else 0.4,
+        provenance=[f.get("id", str(uuid.uuid4())) for f in flights],
     )
     hotel_reply = TaskReply(
-        status="done" if params.hotels else "partial",
-        candidates=params.hotels,
-        assumptions=["Double room assumed"],
+        status="done" if hotels else "partial",
+        candidates=hotels,
+        assumptions=hotel_assumptions,
         cost_usd=0.0,
-        confidence=0.9 if params.hotels else 0.4,
-        provenance=[h.get("id", str(uuid.uuid4())) for h in params.hotels],
+        confidence=0.9 if hotels else 0.4,
+        provenance=[h.get("id", str(uuid.uuid4())) for h in hotels],
     )
     restaurant_reply = TaskReply(
-        status="done" if params.restaurants else "partial",
-        candidates=params.restaurants,
-        assumptions=["Dinner assumed"],
+        status="done" if restaurants else "partial",
+        candidates=restaurants,
+        assumptions=["Dinner assumed"] + ([near_hotel] if near_hotel else []),
         cost_usd=0.0,
-        confidence=0.9 if params.restaurants else 0.4,
-        provenance=[r.get("id", str(uuid.uuid4())) for r in params.restaurants],
+        confidence=0.9 if restaurants else 0.4,
+        provenance=[r.get("id", str(uuid.uuid4())) for r in restaurants],
     )
     attraction_reply = TaskReply(
-        status="done" if params.attractions else "partial",
-        candidates=params.attractions,
-        assumptions=["Half-day sightseeing pace assumed unless specified"],
+        status="done" if attractions else "partial",
+        candidates=attractions,
+        assumptions=["Half-day sightseeing pace assumed unless specified"] + ([near_hotel] if near_hotel else []),
         cost_usd=0.0,
-        confidence=0.9 if params.attractions else 0.4,
-        provenance=[a.get("id", str(uuid.uuid4())) for a in params.attractions],
+        confidence=0.9 if attractions else 0.4,
+        provenance=[a.get("id", str(uuid.uuid4())) for a in attractions],
     )
 
     constraints_payload = (
@@ -292,10 +334,7 @@ async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
 
     # When policy is breach the graph exits before compile_itinerary runs,
     # so itin is empty. Use "needs_approval" instead of the misleading "error".
-    if policy == "breach" and not itin:
-        status = "needs_approval"
-    else:
-        status = itin.get("status", "error")
+    status = "needs_approval" if policy == "breach" and not itin else itin.get("status", "error")
 
     return ItineraryResult(
         plan_id=params.plan_id,
@@ -309,6 +348,10 @@ async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
         budget_alternatives=result.get("budget_alternatives") or [],
         resolved_constraints=result.get("constraints") or {},
         quality_review=itin.get("quality_review") or {},
+        # Read off top-level state (not `itin`) so a budget breach — where
+        # compile_itinerary never runs and itin is empty — still surfaces the
+        # merge_results/budget_agent decision-log entries.
+        decision_log=result.get("decision_log") or [],
     )
 
 

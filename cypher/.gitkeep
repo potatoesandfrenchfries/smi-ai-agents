@@ -1,0 +1,9 @@
+# Paired .cypher + .meta.yaml templates go here (see neo4j_client/templates.py).
+#
+# Empty is a valid state: TemplateLoader only warns on zero templates, it
+# does not raise — but the directory itself must exist, or the conversation
+# API's lifespan startup fails at `TemplateLoader()` before it ever binds a
+# port. Every agent_definitions/*.yaml currently sets
+# `graph.allowed_cypher_templates: []`, so nothing references a template by
+# name yet; add one here (and to the relevant agent's allowlist) once a
+# domain needs a graph query the safe executor can run.

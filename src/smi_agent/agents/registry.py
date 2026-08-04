@@ -28,10 +28,12 @@ from smi_agent.llm.router import LLMRouter
 from smi_agent.neo4j_client.driver import Neo4jDriver
 from smi_agent.neo4j_client.safe_executor import SafeCypherExecutor
 from smi_agent.neo4j_client.templates import TemplateLoader
+from smi_agent.observability.logging import get_planner_trace_logger
 from smi_agent.postgres_client.safe_executor import SafePostgresExecutor
 from smi_agent.streaming import StepEmitter
 
 logger = logging.getLogger(__name__)
+trace_logger = get_planner_trace_logger()
 
 
 # ── Custom specialist class mapping ──────────────────────────────────────────
@@ -41,7 +43,15 @@ logger = logging.getLogger(__name__)
 def _build_custom_map() -> dict[str, type]:
     # Import custom specialists here to avoid circular imports.
     # Each domain can add its own custom specialists to this map.
-    return {}
+    from smi_agent.agents.specialists.flight import FlightSpecialist
+    from smi_agent.agents.specialists.hotel import HotelSpecialist
+    from smi_agent.agents.specialists.restaurant import RestaurantSpecialist
+
+    return {
+        "specialist_flight": FlightSpecialist,
+        "specialist_hotel": HotelSpecialist,
+        "specialist_restaurant": RestaurantSpecialist,
+    }
 
 
 # ── Generic specialist wrapper ───────────────────────────────────────────────
@@ -56,6 +66,7 @@ class GenericSpecialist(BaseSpecialist):
         neo4j_driver: Neo4jDriver,
         template_loader: TemplateLoader,
         pg_client: Any | None = None,
+        specialist_registry: AgentRegistry | None = None,
     ) -> None:
         self._def_name = agent_def_name
         self._defn = load_agent_definition(agent_def_name)
@@ -63,6 +74,15 @@ class GenericSpecialist(BaseSpecialist):
         self._template_loader = template_loader
         self._pg_client = pg_client
         self._prompt_loader = PromptLoader(self._defn.llm.prompt_templates_dir)
+        # Sibling registry, so this specialist's tool-calling loop can expose
+        # other specialists (e.g. flight/hotel/restaurant) as ask_<name> tools
+        # — this is what lets the "planner" specialist dynamically decide
+        # which specialists to invoke instead of following a fixed pipeline.
+        # Passed in by AgentRegistry._discover() as `self` — its own
+        # `_specialists` dict isn't fully populated yet at construction time,
+        # but that's fine: we only read it lazily inside run(), by which
+        # point discovery has long since finished.
+        self._specialist_registry = specialist_registry
 
     @property
     def name(self) -> str:
@@ -97,13 +117,33 @@ class GenericSpecialist(BaseSpecialist):
                 agent_name=self._defn.name,
             )
 
+        # Sibling specialists this agent may dynamically delegate to, exposed
+        # as ask_<name> tools (e.g. the "planner" specialist gets ask_flight,
+        # ask_hotel, ask_restaurant). Excludes self to avoid a specialist
+        # recursively calling itself. Only populated when a sibling registry
+        # was supplied — most specialists don't need this.
+        sibling_specialists = (
+            [s for s in self._specialist_registry.all_specialists() if s.name != self.name]
+            if self._specialist_registry is not None
+            else []
+        )
+
         tc = self._defn.tool_calling
         registry = ToolRegistry(
             cypher_executor=cypher_exec,
             postgres_executor=pg_exec,
             template_loader=self._template_loader,
             enabled_tools=tc.enabled_tools or None,
+            specialists=sibling_specialists,
+            specialist_context=context,
+            step_emitter=step_emitter,
         )
+
+        if sibling_specialists:
+            trace_logger.info(
+                "[%s] dynamic tools available: %s",
+                self.name, ", ".join(f"ask_{s.name}" for s in sibling_specialists),
+            )
 
         tenant_id = context.get("tenant_id", "00000000-0000-0000-0000-000000000001")
         entity_id = context.get("entity_id", "")
@@ -191,10 +231,12 @@ class AgentRegistry:
                         neo4j_driver=self._driver,
                         template_loader=self._loader,
                         pg_client=self._pg_client,
+                        specialist_registry=self,
                     )
 
                 self._specialists[short_name] = specialist
                 logger.info("Registered specialist: %s (%s)", short_name, type(specialist).__name__)
+                trace_logger.info("REGISTER specialist=%s impl=%s", short_name, type(specialist).__name__)
 
             except Exception:
                 logger.exception("Failed to load specialist %s", def_name)

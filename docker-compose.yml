@@ -1,0 +1,362 @@
+# Full local stack for trial/testing (requirement #11: containerize +
+# docker-compose). One command brings up every backing store plus all four
+# application processes:
+#
+#   docker compose up --build
+#
+# Then open http://localhost:5173 (see "How to run for trial" in the repo
+# root — or just use the URLs printed by `docker compose ps`).
+#
+# Services and ports:
+#   postgres      5433   smi_agent's own schema (db/migrations/*.sql, applied on first init)
+#                        (mapped to 5433 on the host — 5432 is a common
+#                        conflict with a locally-installed Postgres; the
+#                        container's internal port is still 5432)
+#   redis         6379   session store, SSE pub/sub, search-result cache
+#   neo4j         7474   browser UI · 7687 bolt
+#   temporal      7233   gRPC frontend (workflow client/worker traffic)
+#   temporal-ui   8233   Temporal Web UI (http://localhost:8233)
+#   api           8080   FastAPI conversation service (smi-conversation-worker)
+#   worker-orchestrator   9100   ItineraryWorkflow only, no activities — task queue "smartinerary"
+#   worker-flight         9101   flight-search agent      — task queue "flight-search"
+#   worker-hotel          9102   hotel-search agent       — task queue "hotel-search"
+#   worker-restaurant     9103   restaurant-search agent  — task queue "restaurant-search"
+#   worker-attraction     9104   attraction-search agent  — task queue "attraction-search"
+#   worker-itinerary      9105   itinerary-generation agent (LangGraph pipeline: intent
+#                                parsing, merge/policy/compile/reflect) — task queue "itinerary-generation"
+#   worker-core           9106   persist_trip + workflow-metric bookkeeping — task queue "core-services"
+#                        (ports above are each worker's own /metrics endpoint, not app traffic —
+#                        each is a separately deployable/scalable container; see smi_agent/worker.py)
+#   gateway       4000   Node/TypeScript REST gateway (conversation proxy + itinerary/HITL over Temporal)
+#   web           5173   React/TypeScript console — the thing you actually open in a browser
+#   prometheus    9090   Scrapes every /metrics endpoint above (config: ./prometheus.yml) —
+#                        http://localhost:9090 for the expression browser / ad-hoc queries
+#
+# LLM calls need a real provider key. Put it in a `.env` file at the repo
+# root (see `.env.example`) — compose loads that file automatically.
+
+services:
+  # ── Backing stores ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: smi
+      POSTGRES_PASSWORD: smi
+      POSTGRES_DB: smi_agent
+    ports:
+      - "5433:5432"
+    volumes:
+      - smi_postgres_data:/var/lib/postgresql/data
+      # Alphabetical filenames (001_... through 009_...) apply in order, and
+      # only on first init against an empty data volume — matches Postgres's
+      # own docker-entrypoint-initdb.d convention.
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smi -d smi_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: "neo4j/smi_neo4j_pw"
+      NEO4J_server_memory_pagecache_size: 256M
+      NEO4J_server_memory_heap_max__size: 512M
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - smi_neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p smi_neo4j_pw 'RETURN 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Dedicated backing store for Temporal's own schema, kept separate from the
+  # `postgres` service above so Temporal's auto-setup migrations never touch
+  # (or race against) smi_agent's own db/migrations.
+  temporal-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - smi_temporal_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Temporal ─────────────────────────────────────────────────────────────────
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: temporal-postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "7233:7233"
+    healthcheck:
+      # NOT 127.0.0.1: the auto-setup entrypoint binds the frontend to the
+      # container's own interface IP (BIND_ON_IP := getent hosts $(hostname)),
+      # never to loopback — a check against 127.0.0.1 fails forever even
+      # though the server is up and reachable from every other container.
+      test: ["CMD-SHELL", "nc -z $(hostname -i) 7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      # Schema setup (auto-setup.sh) runs before the frontend ever binds
+      # 7233, and reliably takes longer than retries*interval on a cold
+      # volume — failures during this window shouldn't count against the
+      # retry budget the way a real post-startup failure should.
+      start_period: 60s
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: "http://localhost:3000"
+    ports:
+      - "8233:8080"
+
+  # ── Application ──────────────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-conversation-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      REDIS_URL: redis://redis:6379/0
+      SMI_POSTGRES_URL: postgresql://smi:smi@postgres:5432/smi_agent
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: smi_neo4j_pw
+      SMI_DOMAIN: smi_agent.examples.travel
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SMI_ENV: dev
+    ports:
+      - "8080:8080"
+    restart: on-failure
+
+  # ── Per-agent Temporal workers ───────────────────────────────────────────────
+  # Each agent (flight/hotel/restaurant/attraction/itinerary-generation) is its
+  # own container polling its own task queue (see smi_agent/worker.py and
+  # smi_agent/activities/task_queues.py) — independently deployable and
+  # scalable without affecting any other agent. The orchestrator worker hosts
+  # only the ItineraryWorkflow definition; it dispatches activities onto the
+  # other workers' queues rather than running any activity itself.
+
+  worker-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment: &worker-common-env
+      TEMPORAL_HOST: temporal:7233
+      REDIS_URL: redis://redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: smi_neo4j_pw
+      SMI_DOMAIN: smi_agent.examples.travel
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SMI_ENV: dev
+      # Live provider keys are optional — providers/registry.py falls back to
+      # mock flight/hotel/restaurant data when these are unset.
+      AVIATIONSTACK_API_KEY: ${AVIATIONSTACK_API_KEY:-}
+      SMI_AGENT_QUEUE: orchestrator
+    ports:
+      - "9100:9100"
+    restart: on-failure
+
+  worker-flight:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *worker-common-env
+      SMI_AGENT_QUEUE: flight-search
+    ports:
+      - "9101:9100"
+    restart: on-failure
+
+  worker-hotel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *worker-common-env
+      SMI_AGENT_QUEUE: hotel-search
+    ports:
+      - "9102:9100"
+    restart: on-failure
+
+  worker-restaurant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *worker-common-env
+      SMI_AGENT_QUEUE: restaurant-search
+    ports:
+      - "9103:9100"
+    restart: on-failure
+
+  worker-attraction:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *worker-common-env
+      SMI_AGENT_QUEUE: attraction-search
+    ports:
+      - "9104:9100"
+    restart: on-failure
+
+  worker-itinerary:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      <<: *worker-common-env
+      SMI_AGENT_QUEUE: itinerary-generation
+    ports:
+      - "9105:9100"
+    restart: on-failure
+
+  worker-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-agent-worker"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      <<: *worker-common-env
+      SMI_AGENT_QUEUE: core-services
+    ports:
+      - "9106:9100"
+    restart: on-failure
+
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+      - temporal
+    environment:
+      GATEWAY_PORT: "4000"
+      CONVERSATION_API_URL: http://api:8080
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      SMI_TASK_QUEUE: smartinerary
+      GATEWAY_CORS_ORIGIN: http://localhost:5173
+    ports:
+      - "4000:4000"
+    restart: on-failure
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    depends_on:
+      - gateway
+    environment:
+      # Read by the browser, not the container — must be reachable from the
+      # host, so localhost:4000 (the mapped port) is correct here, not
+      # gateway:4000 (the container-network name).
+      VITE_GATEWAY_URL: http://localhost:4000
+    ports:
+      - "5173:5173"
+
+  # ── Observability ────────────────────────────────────────────────────────────
+  # Every service above already emits Prometheus metrics via prometheus-client
+  # (src/smi_agent/observability/metrics.py) on its own /metrics endpoint; this
+  # is what actually scrapes and stores them — without it those endpoints just
+  # sit there unread. Scrape targets in ./prometheus.yml.
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - smi_prometheus_data:/prometheus
+    depends_on:
+      - api
+      - worker-orchestrator
+      - worker-flight
+      - worker-hotel
+      - worker-restaurant
+      - worker-attraction
+      - worker-itinerary
+      - worker-core
+    ports:
+      - "9090:9090"
+    restart: on-failure
+
+volumes:
+  smi_prometheus_data:
+  smi_postgres_data:
+  smi_neo4j_data:
+  smi_temporal_postgres_data:

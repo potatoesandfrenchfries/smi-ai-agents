@@ -1,32 +1,35 @@
-# React + TypeScript + Vite
+# web
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React/TypeScript console — the Smartinerary UI. Chat interface plus
+itinerary review (human-in-the-loop confirm/edit before booking).
 
-Currently, two official plugins are available:
+Talks only to the `gateway` service (`VITE_GATEWAY_URL`); never calls the
+Python `api` or Temporal directly.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Layout
 
-## React Compiler
+| Path | Purpose |
+| --- | --- |
+| `src/api/client.ts` | HTTP client for the gateway REST API |
+| `src/api/sse.ts` | Server-sent events client (chat streaming, reasoning steps) |
+| `src/api/structuredContent.ts` | Parses structured response blocks from the supervisor/specialist agents |
+| `src/api/mock.ts` | Mock data for local UI development without a backend |
+| `src/hooks/useChat.ts` | Chat state + SSE streaming |
+| `src/hooks/useConversations.ts` | Conversation list/CRUD |
+| `src/hooks/useItinerary.ts` | Itinerary polling + HITL review actions |
+| `src/components/conversation/` | Chat UI |
+| `src/components/itinerary/` | Itinerary review/confirm UI |
+| `src/components/layout/`, `common/` | Shared layout and UI primitives |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Local dev
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev         # http://localhost:5173
+npm run lint
+npm run build
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Requires `VITE_GATEWAY_URL` pointing at a running `gateway` (default
+`http://localhost:4000`). See the repo root `docker-compose.yml` to run the
+full stack instead.

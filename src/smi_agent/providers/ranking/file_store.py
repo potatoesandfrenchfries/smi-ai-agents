@@ -70,3 +70,22 @@ class FileRankingStore:
             for line in path.read_text().splitlines()
             if line.strip()
         ]
+
+    async def list_all_events(self) -> list[RecommendationEvent]:
+        """Every event across every user — feeds providers/ranking/metrics.py.
+        Not part of the RankingStore protocol (a Postgres-backed store would
+        answer this with a plain SELECT, not a per-user file scan)."""
+        return await asyncio.to_thread(self._read_all_events)
+
+    def _read_all_events(self) -> list[RecommendationEvent]:
+        events_dir = self._base_dir / "events"
+        if not events_dir.exists():
+            return []
+        events: list[RecommendationEvent] = []
+        for path in sorted(events_dir.glob("*.jsonl")):
+            events.extend(
+                RecommendationEvent(**json.loads(line))
+                for line in path.read_text().splitlines()
+                if line.strip()
+            )
+        return events

@@ -175,3 +175,13 @@ def _strip_queries(text: str) -> str:
 def _redact_pii(text: str) -> str:
     """Redact email addresses from text."""
     return _EMAIL_RE.sub("[email redacted]", text)
+
+
+def sanitize_text(text: str) -> str:
+    """Strip query fragments and redact PII from a plain string.
+
+    Same rules as ``OutputGuardrails.sanitize`` but for callers that don't
+    have a ``StructuredResponse`` envelope to sanitize — e.g. streamed chat
+    text or free-text fields written into a Temporal workflow's output.
+    """
+    return _redact_pii(_strip_queries(text))

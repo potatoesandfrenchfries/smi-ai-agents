@@ -26,6 +26,9 @@ from typing import Any, get_args
 from pydantic import ValidationError
 
 from smi_agent.agents.response import (
+    ContentBlock,
+    EntityCardContent,
+    EntityField,
     ResponseMeta,
     ResponseType,
     SourceRef,
@@ -47,6 +50,18 @@ _VALID_RESPONSE_TYPES: set[str] = set(get_args(ResponseType))
 
 # Max result chars per tool call (protects context window)
 _MAX_TOOL_RESULT = 4000
+
+# Cap on in-process re-prompts when the final structured-output call returns
+# malformed JSON — matches Temporal's own activity retry ceiling (see
+# activities/itinerary_workflow.py::_default_retry, maximum_attempts=3) and
+# graph/itinerary_graph.py's ReflectionAgent, which uses the same cap.
+_MAX_STRUCTURED_OUTPUT_RETRIES = 3
+
+# entity_card grounding (see _ground_entity_cards): keys excluded when
+# auto-deriving displayed fields from a raw tool record, and the cap on how
+# many fields a card shows.
+_ENTITY_CARD_EXCLUDED_KEYS = {"id", "reason", "provenance"}
+_MAX_ENTITY_CARD_FIELDS = 8
 
 # Response schema hint injected into the final LLM call
 _STRUCTURED_OUTPUT_HINT = """
@@ -74,7 +89,15 @@ Rules:
 - NEVER use emojis — strictly prohibited, no exceptions
 - Include 3-5 followUp questions you can actually answer with your available tools
 - Return ONLY valid JSON, no markdown fences
+- For "entity_card" blocks: "entityId" MUST be an id that actually appeared in
+  a tool result above — never invent one. Its "title" and other fields are
+  looked up from the real record and replace whatever you write here, so
+  focus on picking the right entityId, not on describing it.
 """
+
+
+def _humanize_key(key: str) -> str:
+    return key.replace("_", " ").replace("-", " ").strip().title()
 
 
 class AgentRuntime:
@@ -125,6 +148,10 @@ class AgentRuntime:
         thinking: list[str] = []
         total_tokens = 0
         total_cost = 0.0
+        # Real records seen from tool results this turn, keyed by id — the
+        # only source of truth entity_card facts are allowed to come from
+        # (see _ground_entity_cards).
+        known_entities: dict[str, dict[str, Any]] = {}
 
         logger.info("[%s] START query=%r tools=%d", self._name, user_message[:120], len(tools))
         trace_logger.info(
@@ -205,12 +232,17 @@ class AgentRuntime:
                 tool_result = await self._registry.execute(tc)
                 tools_used.append(tool_name)
 
-                # Count records for source attribution
+                # Count records for source attribution, and index any
+                # id-bearing records so entity_card blocks can be grounded
+                # against them later (see _ground_entity_cards).
                 record_count = 0
                 if tool_result.success:
                     try:
                         parsed = json.loads(tool_result.content)
                         record_count = len(parsed) if isinstance(parsed, list) else 1
+                        for record in (parsed if isinstance(parsed, list) else [parsed]):
+                            if isinstance(record, dict) and record.get("id") is not None:
+                                known_entities[str(record["id"])] = record
                     except (json.JSONDecodeError, TypeError):
                         record_count = 1
 
@@ -253,17 +285,25 @@ class AgentRuntime:
         })
 
         try:
-            final_result = await self._router.call(
-                messages=messages,
-                trace_name=f"{self._name}_final",
-            )
-            calls_made += 1
-            total_tokens += (final_result.tokens_input or 0) + (final_result.tokens_output or 0)
-            total_cost += final_result.cost_usd
+            # Budget-aware: never let the parse-retry loop push total calls
+            # past self._max_calls, it just gets fewer retries if the ReAct
+            # loop already spent most of the budget on tool calls.
+            remaining_calls = max(1, self._max_calls - calls_made)
+            max_attempts = min(_MAX_STRUCTURED_OUTPUT_RETRIES, remaining_calls)
 
-            logger.info("[%s] FINAL_LLM raw_length=%d", self._name, len(final_result.content))
-            logger.debug("[%s] FINAL_LLM raw=%s", self._name, final_result.content[:500])
-            response = self._parse_structured_response(final_result.content)
+            response, attempt_results = await self._call_for_structured_response(
+                messages, max_attempts=max_attempts,
+            )
+            for r in attempt_results:
+                calls_made += 1
+                total_tokens += (r.tokens_input or 0) + (r.tokens_output or 0)
+                total_cost += r.cost_usd
+
+            final_raw = attempt_results[-1].content
+            logger.info(
+                "[%s] FINAL_LLM raw_length=%d attempts=%d", self._name, len(final_raw), len(attempt_results)
+            )
+            logger.debug("[%s] FINAL_LLM raw=%s", self._name, final_raw[:500])
             logger.info("[%s] PARSED responseType=%s blocks=%d payload=%s",
                         self._name, response.responseType, len(response.blocks),
                         "present" if response.payload else "null")
@@ -271,6 +311,10 @@ class AgentRuntime:
             logger.warning("[%s] final LLM call failed: %s", self._name, exc)
             response = simple_response(self._name, "I encountered an issue preparing the results. Please try again.")
             response.status = "error"
+
+        # Ground entity_card facts in real tool data; drop any card
+        # referencing an id the LLM invented (anti-hallucination).
+        self._ground_entity_cards(response, known_entities)
 
         # ── Deterministic responseType from tools_used (via domain) ────────
         response.responseType = _infer_response_type(
@@ -316,8 +360,48 @@ class AgentRuntime:
 
         return response
 
-    def _parse_structured_response(self, raw_content: str) -> StructuredResponse:
-        """Parse LLM output into StructuredResponse. Fallback to text block."""
+    async def _call_for_structured_response(
+        self, messages: list[dict[str, Any]], max_attempts: int,
+    ) -> tuple[StructuredResponse, list[Any]]:
+        """Call the LLM for the final structured answer, retrying on malformed
+        JSON up to ``max_attempts`` times before falling back to a plain text
+        block. Returns (response, call_results) — callers fold every attempt's
+        tokens/cost into their own running totals, since each retry is a real
+        billed LLM call.
+        """
+        call_results: list[Any] = []
+
+        for attempt in range(max_attempts):
+            result = await self._router.call(
+                messages=messages, trace_name=f"{self._name}_final_attempt_{attempt + 1}",
+            )
+            call_results.append(result)
+
+            parsed = self._try_parse_structured_response(result.content)
+            if parsed is not None:
+                return parsed, call_results
+
+            logger.warning(
+                "[%s] structured output parse failed (attempt %d/%d)",
+                self._name, attempt + 1, max_attempts,
+            )
+            if attempt < max_attempts - 1:
+                messages.append({"role": "assistant", "content": result.content})
+                messages.append({
+                    "role": "user",
+                    "content": "That response was not valid JSON matching the schema above. "
+                               "Return ONLY the JSON object — no markdown fences, no explanation.",
+                })
+
+        logger.debug("%s: structured parse failed after %d attempt(s), falling back to text", self._name, max_attempts)
+        return (
+            StructuredResponse(blocks=[text_block(call_results[-1].content)], status="partial"),
+            call_results,
+        )
+
+    def _try_parse_structured_response(self, raw_content: str) -> StructuredResponse | None:
+        """Attempt to parse LLM output into StructuredResponse. Returns None
+        (no fallback) so the caller can decide whether to retry."""
         content = raw_content.strip()
 
         # Strip markdown fences
@@ -352,17 +436,60 @@ class AgentRuntime:
                         return StructuredResponse(blocks=[block])
 
         except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
-            logger.debug("%s: structured parse failed (%s), falling back to text", self._name, exc)
+            logger.debug("%s: structured parse failed (%s)", self._name, exc)
 
-        return StructuredResponse(
-            blocks=[text_block(raw_content)],
-            status="partial",
-        )
+        return None
+
+    def _ground_entity_cards(
+        self, response: StructuredResponse, known_entities: dict[str, dict[str, Any]],
+    ) -> None:
+        """Replace LLM-authored entity_card facts with the real tool record,
+        and drop any card referencing an entityId that was never actually
+        returned by a tool call this turn.
+
+        The model gets to choose *which* entity to feature; it never gets to
+        author what that entity's facts are — those come only from
+        ``known_entities`` (collected in ``run()`` from actual tool results).
+        Mutates ``response.blocks`` in place.
+        """
+        if not known_entities:
+            # Nothing to ground against — an entity_card here can only be
+            # hallucinated, since no tool returned any id-bearing record.
+            grounded = [b for b in response.blocks if b.type != "entity_card"]
+            if len(grounded) != len(response.blocks):
+                logger.warning(
+                    "[%s] dropped %d entity_card block(s) — no tool results to ground against",
+                    self._name, len(response.blocks) - len(grounded),
+                )
+            response.blocks = grounded
+            return
+
+        grounded_blocks: list[ContentBlock] = []
+        for block in response.blocks:
+            if block.type != "entity_card" or not isinstance(block.content, EntityCardContent):
+                grounded_blocks.append(block)
+                continue
+
+            record = known_entities.get(block.content.entityId)
+            if record is None:
+                logger.warning(
+                    "[%s] dropped entity_card referencing unknown entityId=%r (not in any tool result)",
+                    self._name, block.content.entityId,
+                )
+                continue
+
+            block.content.title = str(record.get("name") or record.get("title") or record.get("id"))
+            block.content.fields = [
+                EntityField(label=_humanize_key(k), value=str(v))
+                for k, v in record.items()
+                if k not in _ENTITY_CARD_EXCLUDED_KEYS and v is not None
+            ][:_MAX_ENTITY_CARD_FIELDS]
+            grounded_blocks.append(block)
+
+        response.blocks = grounded_blocks
 
     def _parse_block(self, block_data: dict) -> Any:
         """Parse a single block dict. Returns ContentBlock or None."""
-        from smi_agent.agents.response import ContentBlock
-
         try:
             return ContentBlock.model_validate(block_data)
         except Exception:

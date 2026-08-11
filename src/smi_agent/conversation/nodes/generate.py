@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from smi_agent.agents.guardrails import sanitize_text
 from smi_agent.config.models import AgentDefinition
 from smi_agent.conversation.state import ConversationState
 from smi_agent.conversation.token_counter import count_message_tokens_async, should_compact
@@ -102,6 +103,7 @@ def make_generate_node(defn: AgentDefinition, prompt_loader: PromptLoader):
                 tokens_in = result.tokens_input or 0
                 tokens_out = result.tokens_output or 0
 
+            assistant_content = sanitize_text(assistant_content)
             tokens_this_turn = tokens_in + tokens_out
 
             history = history + [
@@ -166,7 +168,7 @@ async def _stream_llm_response(
         if choice and choice.delta and choice.delta.content:
             full_text += choice.delta.content
             # Publish accumulated text (frontend replaces the assistant bubble)
-            await sse_streamer.publish_token(session_id, full_text)
+            await sse_streamer.publish_token(session_id, sanitize_text(full_text))
 
         # Extract usage from final chunk (Anthropic / OpenAI include it)
         if hasattr(chunk, "usage") and chunk.usage:

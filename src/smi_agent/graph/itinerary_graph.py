@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
+from smi_agent.agents.guardrails import InputGuardrails, sanitize_text
 from smi_agent.graph.state import ItineraryState, TaskReply, TaskRequest, TripConstraints
 from smi_agent.streaming.step_emitter import NullStepEmitter
 
@@ -70,6 +71,11 @@ REQUIRED_FIELDS: list[str] = ["origin", "destination", "check_in", "check_out"]
 SUBTASK_DEADLINE_SECONDS = 30
 SUBTASK_BUDGET_USD = 0.50
 
+# Cap on in-process re-prompts when an LLM call returns malformed structured
+# output — matches Temporal's own activity retry ceiling (see
+# activities/itinerary_workflow.py::_default_retry, maximum_attempts=3).
+_MAX_LLM_PARSE_RETRIES = 3
+
 # Hotel amenities considered "business-friendly" — used to filter/tag business-path
 # hotel candidates and to surface a business_amenities summary in compile_itinerary.
 BUSINESS_AMENITIES: set[str] = {"Business centre", "Free WiFi", "Concierge", "Airport shuttle"}
@@ -83,6 +89,51 @@ def _emitter(state: ItineraryState) -> Any:
 
 def _missing_fields(constraints: TripConstraints) -> list[str]:
     return [f for f in REQUIRED_FIELDS if not constraints.get(f)]
+
+
+def _validate_constraints(constraints: TripConstraints) -> list[str]:
+    """Validate constraint *values* once all required fields are present.
+
+    Complements ``_missing_fields`` (presence) with sanity checks on
+    dates/budget/destination — catches a garbled or nonsensical goal before
+    it reaches specialist search rather than after (FR-INT-2/3).
+    """
+    issues: list[str] = []
+
+    check_in_dt = check_out_dt = None
+    for label, value in (("check_in", constraints.get("check_in")), ("check_out", constraints.get("check_out"))):
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            issues.append(f"{label} must be a valid date in YYYY-MM-DD format")
+            continue
+        if label == "check_in":
+            check_in_dt = parsed
+        else:
+            check_out_dt = parsed
+
+    if check_in_dt is not None and check_in_dt.date() < datetime.utcnow().date():
+        issues.append("check_in cannot be in the past")
+    if check_in_dt is not None and check_out_dt is not None and check_out_dt <= check_in_dt:
+        issues.append("check_out must be after check_in")
+
+    budget_gbp = constraints.get("budget_gbp")
+    if budget_gbp is not None and budget_gbp <= 0:
+        issues.append("budget_gbp must be a positive number")
+
+    origin = constraints.get("origin")
+    destination = constraints.get("destination")
+    if origin and destination and origin.strip().lower() == destination.strip().lower():
+        issues.append("destination must differ from origin")
+
+    return issues
+
+
+def _missing_or_invalid(constraints: TripConstraints) -> list[str]:
+    """Presence check first — no point reporting invalid values for fields
+    that were never extracted in the first place."""
+    missing = _missing_fields(constraints)
+    return missing if missing else _validate_constraints(constraints)
 
 
 def _make_task_request(
@@ -207,10 +258,22 @@ async def resolve_trip_constraints(raw_goal: str) -> tuple[TripConstraints, list
     ItineraryWorkflow only received raw_goal with no pre-resolved trip
     fields, before any search activity can be dispatched.
 
-    Returns (constraints, missing_required_fields).
+    Returns (constraints, issues) — issues holds missing-required-field
+    names, or (once all required fields are present) constraint-validation
+    problems like a bad date range or non-positive budget; see
+    ``_missing_or_invalid``.
     """
     goal = raw_goal
     goal_lower = goal.lower()
+
+    valid, reason = InputGuardrails.validate(raw_goal)
+    if not valid:
+        logger.warning("[parse_intent] Rejected by input guardrails: %s", reason)
+        empty = TripConstraints(
+            origin=None, destination=None, check_in=None, check_out=None,
+            budget_gbp=None, purpose="leisure", traveler_count=1, sort_preference="cost",
+        )
+        return empty, [f"invalid request: {reason}"]
 
     # ── Primary: LLM extraction ───────────────────────────────────────────────
     parsed = await _llm_parse(goal)
@@ -274,7 +337,7 @@ async def resolve_trip_constraints(raw_goal: str) -> tuple[TripConstraints, list
         sort_preference=sort_pref,
     )
 
-    return constraints, _missing_fields(constraints)
+    return constraints, _missing_or_invalid(constraints)
 
 
 async def parse_intent(state: ItineraryState) -> dict:
@@ -292,7 +355,7 @@ async def parse_intent(state: ItineraryState) -> dict:
 
     if state.get("skip_reparse") and state.get("constraints"):
         constraints = state["constraints"]
-        missing = _missing_fields(constraints)
+        missing = _missing_or_invalid(constraints)
         trip_type = _classify_trip_type(constraints.get("purpose"))
         await emitter.emit("parse_intent", "completed", f"Using edited constraints | trip_type={trip_type}")
         return {
@@ -985,6 +1048,11 @@ async def compile_itinerary(state: ItineraryState) -> dict:
     best_hotel = hotel.get("candidates", [{}])[0] if hotel.get("candidates") else {}
     best_attractions = attraction.get("candidates", [])[:3]
 
+    def _reason(text: str | None) -> str | None:
+        # Specialist-written free text — sanitize before it reaches the
+        # traveler, same as any other LLM-authored output (FR-PRS-3).
+        return sanitize_text(text) if text else text
+
     segments = [
         {
             "type": "flight",
@@ -992,7 +1060,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "provider": best_flight.get("airline", "TBC"),
             "summary": f"{best_flight.get('origin')} → {best_flight.get('destination')} on {best_flight.get('date')}",
             "price_gbp": best_flight.get("price_gbp"),
-            "reason": best_flight.get("reason"),
+            "reason": _reason(best_flight.get("reason")),
             "provenance": (flight.get("provenance") or [])[:1],
             "handoff_link": f"https://book.smartinerary.io/flight/{best_flight.get('id', 'TBC')}",
         },
@@ -1002,7 +1070,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "provider": best_hotel.get("name", "TBC"),
             "summary": f"{best_hotel.get('name')} — {best_hotel.get('nights')} nights",
             "price_gbp": best_hotel.get("total_price_gbp"),
-            "reason": best_hotel.get("reason"),
+            "reason": _reason(best_hotel.get("reason")),
             "provenance": (hotel.get("provenance") or [])[:1],
             "handoff_link": f"https://book.smartinerary.io/hotel/{best_hotel.get('id', 'TBC')}",
         },
@@ -1015,7 +1083,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "provider": "Sightseeing",
             "summary": ", ".join(a.get("name", "TBC") for a in best_attractions),
             "price_gbp": round(sum(a.get("entry_fee_gbp") or 0 for a in best_attractions), 2),
-            "reason": best_attractions[0].get("reason") if best_attractions else None,
+            "reason": _reason(best_attractions[0].get("reason")) if best_attractions else None,
             "provenance": (attraction.get("provenance") or [])[:3],
             "handoff_link": None,
         })
@@ -1206,26 +1274,55 @@ class ReflectionAgent:
                 "assumptions": itinerary.get("assumptions"),
             }
             router = LLMRouter(lane="middle", temperature=0.1)
-            result = await router.call(
-                messages=[
-                    {"role": "system", "content": [system_block]},
-                    {"role": "user", "content": json.dumps(summary)},
-                ],
-                trace_name="reflect_itinerary",
-            )
-            text = result.content.strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```[a-z]*\n?", "", text)
-                text = re.sub(r"\n?```$", "", text.strip())
-            parsed = json.loads(text)
-            return {
-                "quality_ok": bool(parsed.get("quality_ok", True)),
-                "issues": parsed.get("issues", []),
-                "notes": parsed.get("notes", ""),
-            }
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": [system_block]},
+                {"role": "user", "content": json.dumps(summary)},
+            ]
+
+            # Malformed JSON gets re-prompted in-process rather than raised —
+            # an exception here would make the whole Temporal activity
+            # succeed-or-fail on this one sub-check, discarding a compiled
+            # itinerary over a parse hiccup. Capped at _MAX_LLM_PARSE_RETRIES
+            # (3), matching this codebase's Temporal activity retry convention.
+            last_exc: Exception | None = None
+            for attempt in range(_MAX_LLM_PARSE_RETRIES):
+                result = await router.call(messages=messages, trace_name="reflect_itinerary")
+                text = result.content.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```[a-z]*\n?", "", text)
+                    text = re.sub(r"\n?```$", "", text.strip())
+                try:
+                    parsed = json.loads(text)
+                    return {
+                        "quality_ok": bool(parsed.get("quality_ok", True)),
+                        "issues": parsed.get("issues", []),
+                        "notes": sanitize_text(parsed.get("notes", "")),
+                    }
+                except (json.JSONDecodeError, TypeError) as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "[%s] quality review JSON parse failed (attempt %d/%d): %s",
+                        self.name, attempt + 1, _MAX_LLM_PARSE_RETRIES, exc,
+                    )
+                    messages.append({"role": "assistant", "content": result.content})
+                    messages.append({
+                        "role": "user",
+                        "content": "That was not valid JSON. Return ONLY the JSON object — no markdown fences, no explanation.",
+                    })
+            raise last_exc or RuntimeError("quality review: no attempts made")
         except Exception as exc:
-            logger.warning("[%s] LLM quality review failed (%s) — treating as quality_ok", self.name, exc)
-            return {"quality_ok": True, "issues": [], "notes": "Quality review unavailable"}
+            # Fail closed, not open: a review we couldn't run is not the same
+            # as a review that passed. Surfaced to the traveler via
+            # quality_ok=False rather than silently waved through.
+            logger.warning(
+                "[%s] LLM quality review failed after %d attempt(s) (%s) — failing closed",
+                self.name, _MAX_LLM_PARSE_RETRIES, exc,
+            )
+            return {
+                "quality_ok": False,
+                "issues": [{"section": None, "problem": "Automated quality review could not be completed"}],
+                "notes": "Quality review unavailable — please double-check this itinerary manually",
+            }
 
 
 def _promote_next_untried(candidates: list[dict], tried_ids: list[str]) -> dict | None:

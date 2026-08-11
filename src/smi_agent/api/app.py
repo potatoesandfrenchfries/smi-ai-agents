@@ -274,6 +274,12 @@ async def chat(
     request: ChatRequest,
     _: None = Depends(_require_api_key),
 ) -> StreamingResponse:
+    from smi_agent.agents.guardrails import InputGuardrails
+
+    valid, reason = InputGuardrails.validate(request.user_message)
+    if not valid:
+        raise HTTPException(status_code=422, detail=reason)
+
     session_store: RedisSessionStore = app.state.session_store
     sse_streamer: SSEStreamer = app.state.sse_streamer
 
@@ -509,6 +515,12 @@ async def conversation_chat_endpoint(
     user_id: str = Depends(_require_user_id),
 ) -> StreamingResponse:
     """Send a message within a conversation (SSE stream with dual-write)."""
+    from smi_agent.agents.guardrails import InputGuardrails
+
+    valid, reason = InputGuardrails.validate(request.message)
+    if not valid:
+        raise HTTPException(status_code=422, detail=reason)
+
     pg = _get_pg_executor()
 
     conv = await get_conversation(pg, conversation_id, user_id)

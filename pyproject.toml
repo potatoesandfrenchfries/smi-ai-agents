@@ -33,6 +33,11 @@ dependencies = [
     "alembic>=1.13",
     # Caching (flight/hotel/restaurant search results) + conversation session store
     "redis[asyncio]>=5.0",
+    # MCP server (mcp_server/) + client (mcp_client/) — search-tool exposure/invocation.
+    # Pulls in httpx as its own transitive dependency, so both worker and api
+    # processes get an HTTP client even though "httpx" itself is only listed
+    # under the conversation extra below.
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +57,7 @@ conversation = [
 [project.scripts]
 smi-agent-worker = "smi_agent.worker:main"
 smi-conversation-worker = "smi_agent.conversation.bootstrap:main"
+smi-mcp-server = "smi_agent.mcp_server.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

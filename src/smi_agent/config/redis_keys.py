@@ -61,6 +61,16 @@ def restaurant_cache_key(fingerprint: str) -> str:
     return f"{_PREFIX}smi:cache:restaurant:{fingerprint}"
 
 
+def weather_cache_key(fingerprint: str) -> str:
+    """Redis key for a cached weather forecast result."""
+    return f"{_PREFIX}smi:cache:weather:{fingerprint}"
+
+
+def maps_cache_key(fingerprint: str) -> str:
+    """Redis key for a cached maps/places search result."""
+    return f"{_PREFIX}smi:cache:maps:{fingerprint}"
+
+
 def get_env() -> str:
     """Return the current environment name."""
     return _ENV

@@ -17,6 +17,9 @@
 #   temporal      7233   gRPC frontend (workflow client/worker traffic)
 #   temporal-ui   8233   Temporal Web UI (http://localhost:8233)
 #   api           8080   FastAPI conversation service (smi-conversation-worker)
+#   mcp-server    9200   MCP server exposing search_flights/search_hotels/
+#                        search_restaurants/get_weather/search_maps/check_budget
+#                        as standardized tools over Streamable HTTP (smi-mcp-server)
 #   worker-orchestrator   9100   ItineraryWorkflow only, no activities — task queue "smartinerary"
 #   worker-flight         9101   flight-search agent      — task queue "flight-search"
 #   worker-hotel          9102   hotel-search agent       — task queue "hotel-search"
@@ -151,13 +154,6 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["smi-conversation-worker"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
     environment:
       PORT: "8080"
       REDIS_URL: redis://redis:6379/0
@@ -168,8 +164,38 @@ services:
       SMI_DOMAIN: smi_agent.examples.travel
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SMI_ENV: dev
+      SMI_MCP_SERVER_URL: http://mcp-server:9200/mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
     ports:
       - "8080:8080"
+    restart: on-failure
+
+  # search_flights/search_hotels/search_restaurants/get_weather/search_maps/
+  # check_budget exposed as MCP tools over Streamable HTTP (mcp_server/
+  # server.py) — thin wrappers around providers/registry.py, called by both
+  # the api service (via ToolRegistry) and every worker-* below (via
+  # graph/itinerary_graph.py + activities/travel_activities.py) instead of
+  # importing providers/registry.py directly.
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["smi-mcp-server"]
+    environment:
+      SMI_MCP_SERVER_PORT: "9200"
+      # Live provider keys are optional — providers/registry.py falls back to
+      # mock flight/hotel/restaurant/weather/maps data when these are unset.
+      AVIATIONSTACK_API_KEY: ${AVIATIONSTACK_API_KEY:-}
+    ports:
+      - "9200:9200"
     restart: on-failure
 
   # ── Per-agent Temporal workers ───────────────────────────────────────────────
@@ -188,6 +214,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      mcp-server:
+        condition: service_started
     environment: &worker-common-env
       TEMPORAL_HOST: temporal:7233
       REDIS_URL: redis://redis:6379/0
@@ -200,6 +228,7 @@ services:
       # Live provider keys are optional — providers/registry.py falls back to
       # mock flight/hotel/restaurant data when these are unset.
       AVIATIONSTACK_API_KEY: ${AVIATIONSTACK_API_KEY:-}
+      SMI_MCP_SERVER_URL: http://mcp-server:9200/mcp
       SMI_AGENT_QUEUE: orchestrator
     ports:
       - "9100:9100"
@@ -213,6 +242,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      mcp-server:
+        condition: service_started
     environment:
       <<: *worker-common-env
       SMI_AGENT_QUEUE: flight-search
@@ -228,6 +259,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      mcp-server:
+        condition: service_started
     environment:
       <<: *worker-common-env
       SMI_AGENT_QUEUE: hotel-search
@@ -243,6 +276,8 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+      mcp-server:
+        condition: service_started
     environment:
       <<: *worker-common-env
       SMI_AGENT_QUEUE: restaurant-search
@@ -277,6 +312,8 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+      mcp-server:
+        condition: service_started
     environment:
       <<: *worker-common-env
       SMI_AGENT_QUEUE: itinerary-generation

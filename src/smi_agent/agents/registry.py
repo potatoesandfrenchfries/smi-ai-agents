@@ -25,6 +25,7 @@ from smi_agent.conversation.tools.registry import ToolRegistry
 from smi_agent.domain.registry import DomainRegistry
 from smi_agent.llm.prompts import PromptLoader
 from smi_agent.llm.router import LLMRouter
+from smi_agent.mcp_client.client import get_mcp_client
 from smi_agent.neo4j_client.driver import Neo4jDriver
 from smi_agent.neo4j_client.safe_executor import SafeCypherExecutor
 from smi_agent.neo4j_client.templates import TemplateLoader
@@ -43,15 +44,17 @@ trace_logger = get_planner_trace_logger()
 def _build_custom_map() -> dict[str, type]:
     # Import custom specialists here to avoid circular imports.
     # Each domain can add its own custom specialists to this map.
-    from smi_agent.agents.specialists.flight import FlightSpecialist
-    from smi_agent.agents.specialists.hotel import HotelSpecialist
-    from smi_agent.agents.specialists.restaurant import RestaurantSpecialist
-
-    return {
-        "specialist_flight": FlightSpecialist,
-        "specialist_hotel": HotelSpecialist,
-        "specialist_restaurant": RestaurantSpecialist,
-    }
+    #
+    # flight/hotel/restaurant used to be hardcoded here, each with a
+    # Python run() that called providers/registry.py directly. They're
+    # YAML-only GenericSpecialists now (same as "planner") — their
+    # search_flights/search_hotels/search_restaurants tools come from
+    # ToolRegistry's MCP source (conversation/tools/registry.py), so the
+    # LLM decides when to call them instead of it being hardcoded per
+    # specialist. See agent_definitions/specialist_flight.yaml's
+    # enabled_tools, which already named these tools before the MCP
+    # server existed to serve them.
+    return {}
 
 
 # ── Generic specialist wrapper ───────────────────────────────────────────────
@@ -137,7 +140,9 @@ class GenericSpecialist(BaseSpecialist):
             specialists=sibling_specialists,
             specialist_context=context,
             step_emitter=step_emitter,
+            mcp_client=get_mcp_client(),
         )
+        await registry.load_mcp_tools()
 
         if sibling_specialists:
             trace_logger.info(

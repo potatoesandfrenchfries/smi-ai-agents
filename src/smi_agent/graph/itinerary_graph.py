@@ -693,15 +693,15 @@ async def run_flight_search(
     task: TaskRequest, constraints: TripConstraints, sort_override: str | None = None,
 ) -> TaskReply:
     from smi_agent.examples.travel.tools.location_resolver import to_iata
+    from smi_agent.mcp_client.client import get_mcp_client
     from smi_agent.providers.explain import annotate_reasons
-    from smi_agent.providers.registry import get_flight_provider
     sort_by = sort_override or constraints.get("sort_preference", "cost")
-    results = await get_flight_provider().search(
-        origin=to_iata(constraints["origin"] or ""),
-        destination=to_iata(constraints["destination"] or ""),
-        date=constraints["check_in"] or "",
-        sort_by=sort_by,
-    )
+    results = await get_mcp_client().call_tool("search_flights", {
+        "origin": to_iata(constraints["origin"] or ""),
+        "destination": to_iata(constraints["destination"] or ""),
+        "date": constraints["check_in"] or "",
+        "sort_by": sort_by,
+    })
     results = annotate_reasons(results, sort_by=sort_by, price_field="price_gbp")
     assumptions = ["Economy class assumed if not specified"]
     if sort_override == "time":
@@ -717,15 +717,15 @@ async def run_hotel_search(
     flight_arrival: str | None = None,
 ) -> TaskReply:
     from smi_agent.examples.travel.tools.location_resolver import to_city_name
+    from smi_agent.mcp_client.client import get_mcp_client
     from smi_agent.providers.explain import annotate_reasons
-    from smi_agent.providers.registry import get_hotel_provider
     sort_by = sort_override or ("rating" if constraints.get("sort_preference") == "comfort" else "price")
-    results = await get_hotel_provider().search(
-        location=to_city_name(constraints["destination"] or ""),
-        check_in=constraints["check_in"] or "",
-        check_out=constraints["check_out"] or "",
-        sort_by=sort_by,
-    )
+    results = await get_mcp_client().call_tool("search_hotels", {
+        "location": to_city_name(constraints["destination"] or ""),
+        "check_in": constraints["check_in"] or "",
+        "check_out": constraints["check_out"] or "",
+        "sort_by": sort_by,
+    })
     assumptions = ["Double room assumed if not specified"]
     if business_only:
         filtered = [h for h in results if BUSINESS_AMENITIES & set(h.get("amenities", []))]
@@ -748,9 +748,11 @@ async def run_restaurant_search(
     task: TaskRequest, constraints: TripConstraints, business_only: bool = False, near_hotel: str | None = None,
 ) -> TaskReply:
     from smi_agent.examples.travel.tools.location_resolver import to_city_name
+    from smi_agent.mcp_client.client import get_mcp_client
     from smi_agent.providers.explain import annotate_reasons
-    from smi_agent.providers.registry import get_restaurant_provider
-    results = await get_restaurant_provider().search(location=to_city_name(constraints["destination"] or ""))
+    results = await get_mcp_client().call_tool(
+        "search_restaurants", {"location": to_city_name(constraints["destination"] or "")}
+    )
     assumptions = ["Dinner assumed if meal type not specified"]
     if business_only:
         filtered = [r for r in results if r.get("business_friendly")]
@@ -907,18 +909,6 @@ async def policy_check(state: ItineraryState) -> dict:
 
 # ── Stage 5 · budget_agent ────────────────────────────────────────────────────
 
-def _combo_cost(
-    flight: dict, hotel: dict, restaurants: list[dict], attractions: list[dict],
-) -> float:
-    return round(
-        (flight.get("price_gbp") or 0)
-        + (hotel.get("total_price_gbp") or 0)
-        + sum(r.get("avg_spend_per_person_gbp") or 0 for r in restaurants)
-        + sum(a.get("entry_fee_gbp") or 0 for a in attractions),
-        2,
-    )
-
-
 async def budget_agent(state: ItineraryState) -> dict:
     """Suggest cheaper alternative combinations when the plan breaches budget.
 
@@ -928,7 +918,14 @@ async def budget_agent(state: ItineraryState) -> dict:
     alternative swaps out one or more segments for its cheapest available
     option and reports the resulting total and savings, so the traveler picks
     a concrete trade-off instead of a generic "over budget" message.
+
+    The actual combo-generation logic lives in providers/budget.py (a
+    BudgetProvider, exposed as the check_budget MCP tool) — this node only
+    supplies the candidates already in state and shapes the result into
+    graph state, matching the other stages' provider-registry pattern.
     """
+    from smi_agent.providers.registry import get_budget_provider
+
     emitter = _emitter(state)
     await emitter.emit("budget_agent", "in_progress", "Looking for cheaper alternatives...")
 
@@ -941,59 +938,15 @@ async def budget_agent(state: ItineraryState) -> dict:
     restaurants = (state.get("restaurant_reply") or {}).get("candidates", [])
     attractions = (state.get("attraction_reply") or {}).get("candidates", [])
 
-    current_flight = flights[0] if flights else {}
-    current_hotel = hotels[0] if hotels else {}
-    current_restaurants = restaurants[:3]
-    current_attractions = attractions[:3] if trip_type == "leisure" else []
-
-    cheapest_flight = min(flights, key=lambda f: f.get("price_gbp") or float("inf"), default={})
-    cheapest_hotel = min(hotels, key=lambda h: h.get("total_price_gbp") or float("inf"), default={})
-    cheapest_restaurants = sorted(
-        restaurants, key=lambda r: r.get("avg_spend_per_person_gbp") or float("inf")
-    )[:3]
-
-    candidates: list[dict] = []
-
-    if cheapest_hotel and cheapest_hotel.get("id") != current_hotel.get("id"):
-        total = _combo_cost(current_flight, cheapest_hotel, current_restaurants, current_attractions)
-        candidates.append({
-            "label": f"Switch hotel to {cheapest_hotel.get('name', 'a cheaper option')}",
-            "total_cost_gbp": total,
-        })
-
-    if cheapest_flight and cheapest_flight.get("id") != current_flight.get("id"):
-        total = _combo_cost(cheapest_flight, current_hotel, current_restaurants, current_attractions)
-        candidates.append({
-            "label": f"Switch flight to {cheapest_flight.get('airline', 'a cheaper option')} "
-                     f"({cheapest_flight.get('departure', 'alternate time')})",
-            "total_cost_gbp": total,
-        })
-
-    combo_label = "Switch to the cheapest flight, hotel, and dining combo"
-    if trip_type == "leisure" and attractions:
-        combo_label += " and skip the optional attractions"
-    candidates.append({
-        "label": combo_label,
-        "total_cost_gbp": _combo_cost(cheapest_flight, cheapest_hotel, cheapest_restaurants, []),
-    })
-
-    # De-dupe identical totals (e.g. only one hotel/flight tier available) and
-    # only surface combos that actually save money, cheapest first, capped at 3.
-    seen_totals: set[float] = set()
-    alternatives: list[dict] = []
-    for c in sorted(candidates, key=lambda c: c["total_cost_gbp"]):
-        savings = round(current_total - c["total_cost_gbp"], 2)
-        if savings <= 0 or c["total_cost_gbp"] in seen_totals:
-            continue
-        seen_totals.add(c["total_cost_gbp"])
-        alternatives.append({
-            "label": c["label"],
-            "total_cost_gbp": c["total_cost_gbp"],
-            "savings_gbp": savings,
-            "within_budget": bool(budget) and c["total_cost_gbp"] <= budget,
-        })
-        if len(alternatives) == 3:
-            break
+    alternatives = await get_budget_provider().search(
+        flights=flights,
+        hotels=hotels,
+        restaurants=restaurants,
+        attractions=attractions,
+        current_total_gbp=current_total,
+        budget_gbp=budget,
+        trip_type=trip_type,
+    )
 
     await emitter.emit(
         "budget_agent", "completed",

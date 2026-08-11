@@ -1,4 +1,4 @@
-"""Provider interfaces for Flights, Hotels, and Restaurants.
+"""Provider interfaces for Flights, Hotels, Restaurants, Weather, Maps, and Budget.
 
 Every call site (Temporal activities, the itinerary LangGraph, specialist
 agents) depends only on these Protocols, never on a concrete data source. A
@@ -43,4 +43,39 @@ class RestaurantProvider(Protocol):
         cuisine: str | None = None,
         sort_by: str = "rating",
         num_results: int = 5,
+    ) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class WeatherProvider(Protocol):
+    async def search(
+        self,
+        location: str,
+        date: str,
+        num_results: int = 5,
+    ) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class MapsProvider(Protocol):
+    async def search(
+        self,
+        location: str,
+        query: str | None = None,
+        num_results: int = 5,
+    ) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class BudgetProvider(Protocol):
+    async def search(
+        self,
+        flights: list[dict[str, Any]],
+        hotels: list[dict[str, Any]],
+        restaurants: list[dict[str, Any]],
+        attractions: list[dict[str, Any]],
+        current_total_gbp: float,
+        budget_gbp: float | None,
+        trip_type: str = "leisure",
+        num_results: int = 3,
     ) -> list[dict[str, Any]]: ...

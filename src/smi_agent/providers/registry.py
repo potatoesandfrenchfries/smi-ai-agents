@@ -16,16 +16,29 @@ Env vars (default shown):
     SMI_FLIGHT_PROVIDER     aviationstack | mock   (default: aviationstack)
     SMI_HOTEL_PROVIDER      overpass | mock         (default: overpass)
     SMI_RESTAURANT_PROVIDER overpass | mock         (default: overpass)
+    SMI_WEATHER_PROVIDER    open_meteo | mock       (default: open_meteo)
+    SMI_MAPS_PROVIDER       nominatim | mock        (default: nominatim)
+    SMI_BUDGET_PROVIDER     default | mock          (default: default)
 """
 
 from __future__ import annotations
 
 import os
 
+from smi_agent.providers.budget import DefaultBudgetProvider, MockBudgetProvider
 from smi_agent.providers.flight import AviationStackFlightProvider, MockFlightProvider
 from smi_agent.providers.hotel import MockHotelProvider, OverpassHotelProvider
-from smi_agent.providers.interface import FlightProvider, HotelProvider, RestaurantProvider
+from smi_agent.providers.interface import (
+    BudgetProvider,
+    FlightProvider,
+    HotelProvider,
+    MapsProvider,
+    RestaurantProvider,
+    WeatherProvider,
+)
+from smi_agent.providers.maps import MockMapsProvider, NominatimMapsProvider
 from smi_agent.providers.restaurant import MockRestaurantProvider, OverpassRestaurantProvider
+from smi_agent.providers.weather import MockWeatherProvider, OpenMeteoWeatherProvider
 
 _FLIGHT_PROVIDERS: dict[str, type[FlightProvider]] = {
     "aviationstack": AviationStackFlightProvider,
@@ -39,10 +52,25 @@ _RESTAURANT_PROVIDERS: dict[str, type[RestaurantProvider]] = {
     "overpass": OverpassRestaurantProvider,
     "mock": MockRestaurantProvider,
 }
+_WEATHER_PROVIDERS: dict[str, type[WeatherProvider]] = {
+    "open_meteo": OpenMeteoWeatherProvider,
+    "mock": MockWeatherProvider,
+}
+_MAPS_PROVIDERS: dict[str, type[MapsProvider]] = {
+    "nominatim": NominatimMapsProvider,
+    "mock": MockMapsProvider,
+}
+_BUDGET_PROVIDERS: dict[str, type[BudgetProvider]] = {
+    "default": DefaultBudgetProvider,
+    "mock": MockBudgetProvider,
+}
 
 _flight_provider: FlightProvider | None = None
 _hotel_provider: HotelProvider | None = None
 _restaurant_provider: RestaurantProvider | None = None
+_weather_provider: WeatherProvider | None = None
+_maps_provider: MapsProvider | None = None
+_budget_provider: BudgetProvider | None = None
 
 
 def get_flight_provider() -> FlightProvider:
@@ -75,3 +103,33 @@ def get_restaurant_provider() -> RestaurantProvider:
             )
         _restaurant_provider = _RESTAURANT_PROVIDERS[name]()
     return _restaurant_provider
+
+
+def get_weather_provider() -> WeatherProvider:
+    global _weather_provider
+    if _weather_provider is None:
+        name = os.environ.get("SMI_WEATHER_PROVIDER", "open_meteo")
+        if name not in _WEATHER_PROVIDERS:
+            raise ValueError(f"Unknown SMI_WEATHER_PROVIDER={name!r}. Allowed: {sorted(_WEATHER_PROVIDERS)}")
+        _weather_provider = _WEATHER_PROVIDERS[name]()
+    return _weather_provider
+
+
+def get_maps_provider() -> MapsProvider:
+    global _maps_provider
+    if _maps_provider is None:
+        name = os.environ.get("SMI_MAPS_PROVIDER", "nominatim")
+        if name not in _MAPS_PROVIDERS:
+            raise ValueError(f"Unknown SMI_MAPS_PROVIDER={name!r}. Allowed: {sorted(_MAPS_PROVIDERS)}")
+        _maps_provider = _MAPS_PROVIDERS[name]()
+    return _maps_provider
+
+
+def get_budget_provider() -> BudgetProvider:
+    global _budget_provider
+    if _budget_provider is None:
+        name = os.environ.get("SMI_BUDGET_PROVIDER", "default")
+        if name not in _BUDGET_PROVIDERS:
+            raise ValueError(f"Unknown SMI_BUDGET_PROVIDER={name!r}. Allowed: {sorted(_BUDGET_PROVIDERS)}")
+        _budget_provider = _BUDGET_PROVIDERS[name]()
+    return _budget_provider

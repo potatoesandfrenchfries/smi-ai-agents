@@ -148,20 +148,20 @@ class PersistTripParams:
 @activity.defn
 async def flight_search_activity(params: FlightSearchParams) -> list[dict]:
     """Search for available flights. Retried by Temporal on failure."""
+    from smi_agent.mcp_client.client import get_mcp_client
     from smi_agent.observability.metrics import track_agent_execution
-    from smi_agent.providers.registry import get_flight_provider
 
     with track_agent_execution("flight_search"):
         activity.logger.info(
             "Searching flights %s → %s on %s", params.origin, params.destination, params.date
         )
-        results = await get_flight_provider().search(
-            origin=params.origin,
-            destination=params.destination,
-            date=params.date,
-            sort_by=params.sort_by,
-            num_results=params.num_results,
-        )
+        results = await get_mcp_client().call_tool("search_flights", {
+            "origin": params.origin,
+            "destination": params.destination,
+            "date": params.date,
+            "sort_by": params.sort_by,
+            "num_results": params.num_results,
+        })
         activity.logger.info("Flight search returned %d results", len(results))
         return results
 
@@ -169,20 +169,20 @@ async def flight_search_activity(params: FlightSearchParams) -> list[dict]:
 @activity.defn
 async def hotel_search_activity(params: HotelSearchParams) -> list[dict]:
     """Search for available hotels. Retried by Temporal on failure."""
+    from smi_agent.mcp_client.client import get_mcp_client
     from smi_agent.observability.metrics import track_agent_execution
-    from smi_agent.providers.registry import get_hotel_provider
 
     with track_agent_execution("hotel_search"):
         activity.logger.info(
             "Searching hotels in %s (%s to %s)", params.location, params.check_in, params.check_out
         )
-        results = await get_hotel_provider().search(
-            location=params.location,
-            check_in=params.check_in,
-            check_out=params.check_out,
-            sort_by=params.sort_by,
-            num_results=params.num_results,
-        )
+        results = await get_mcp_client().call_tool("search_hotels", {
+            "location": params.location,
+            "check_in": params.check_in,
+            "check_out": params.check_out,
+            "sort_by": params.sort_by,
+            "num_results": params.num_results,
+        })
         activity.logger.info("Hotel search returned %d results", len(results))
         return results
 
@@ -190,17 +190,17 @@ async def hotel_search_activity(params: HotelSearchParams) -> list[dict]:
 @activity.defn
 async def restaurant_search_activity(params: RestaurantSearchParams) -> list[dict]:
     """Search for restaurants. Retried by Temporal on failure."""
+    from smi_agent.mcp_client.client import get_mcp_client
     from smi_agent.observability.metrics import track_agent_execution
-    from smi_agent.providers.registry import get_restaurant_provider
 
     with track_agent_execution("restaurant_search"):
         activity.logger.info("Searching restaurants in %s", params.location)
-        results = await get_restaurant_provider().search(
-            location=params.location,
-            cuisine=params.cuisine,
-            sort_by=params.sort_by,
-            num_results=params.num_results,
-        )
+        results = await get_mcp_client().call_tool("search_restaurants", {
+            "location": params.location,
+            "cuisine": params.cuisine,
+            "sort_by": params.sort_by,
+            "num_results": params.num_results,
+        })
         activity.logger.info("Restaurant search returned %d results", len(results))
         return results
 

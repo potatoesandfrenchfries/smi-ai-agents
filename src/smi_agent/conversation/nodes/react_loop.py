@@ -26,6 +26,7 @@ from smi_agent.conversation.state import ConversationState
 from smi_agent.conversation.tools.registry import ToolRegistry
 from smi_agent.llm.prompts import PromptLoader
 from smi_agent.llm.router import LLMRouter
+from smi_agent.mcp_client.client import get_mcp_client
 from smi_agent.neo4j_client.driver import Neo4jDriver
 from smi_agent.neo4j_client.safe_executor import SafeCypherExecutor
 from smi_agent.neo4j_client.templates import TemplateLoader
@@ -85,7 +86,9 @@ def make_react_loop_node(
             postgres_executor=pg_exec,
             template_loader=template_loader,
             enabled_tools=_tc.enabled_tools or None,
+            mcp_client=get_mcp_client(),
         )
+        await registry.load_mcp_tools()
 
         tools = registry.openai_tool_definitions()
         if not tools:

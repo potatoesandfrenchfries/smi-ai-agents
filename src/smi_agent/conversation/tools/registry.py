@@ -1,14 +1,24 @@
 """ToolRegistry — builds OpenAI function-calling tool definitions from Cypher
-templates and Postgres queries, and executes tool calls via SafeExecutors.
+templates, Postgres queries, and MCP tools, and executes tool calls via
+SafeExecutors / the MCP client.
 
-Used by the ReAct agent loop to give the LLM access to Neo4j graph traversal
-and Postgres data queries during conversation turns.
+Used by the ReAct agent loop to give the LLM access to Neo4j graph traversal,
+Postgres data queries, and MCP-exposed search tools (flight/hotel/
+restaurant/weather/maps/budget, see mcp_server/server.py) during
+conversation turns.
 
 Domain integration:
   Domain-specific Postgres tool definitions are provided by the configured
   ``QueryProvider`` via ``DomainRegistry.query_provider().tool_definitions()``.
   Generic (framework-level) tool definitions are still resolved from the
   local ``_PG_TOOL_DEFS`` map.
+
+MCP tools:
+  Unlike the Cypher/Postgres/specialist sources, MCP tool discovery is a
+  network call, so it can't happen inside __init__. Construct the registry,
+  then ``await registry.load_mcp_tools()`` before use — both call sites
+  (agents/registry.py::GenericSpecialist.run, conversation/nodes/
+  react_loop.py) are already inside an async function.
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from typing import Any
 
 from smi_agent.agents.specialists.base import BaseSpecialist
 from smi_agent.domain.registry import DomainRegistry
+from smi_agent.mcp_client.client import MCPClient, MCPToolError
 from smi_agent.neo4j_client.safe_executor import SafeCypherExecutor
 from smi_agent.neo4j_client.templates import TemplateLoader
 from smi_agent.observability.logging import get_planner_trace_logger
@@ -58,6 +69,10 @@ class ToolRegistry:
         specialist_context: Context dict forwarded to each delegated
             specialist's run() (tenant_id, entity_id, etc).
         step_emitter: Forwarded to delegated specialists for SSE step events.
+        mcp_client: Client for the MCP tool server (mcp_server/server.py) —
+            exposes search_flights/search_hotels/search_restaurants/
+            get_weather/search_maps/check_budget. Tool discovery happens in
+            load_mcp_tools(), not here (see module docstring).
     """
 
     def __init__(
@@ -71,6 +86,7 @@ class ToolRegistry:
         specialists: list[BaseSpecialist] | None = None,
         specialist_context: dict[str, Any] | None = None,
         step_emitter: StepEmitter | None = None,
+        mcp_client: MCPClient | None = None,
     ) -> None:
         self._cypher = cypher_executor
         self._pg = postgres_executor
@@ -81,11 +97,45 @@ class ToolRegistry:
         self._specialists: dict[str, BaseSpecialist] = {s.name: s for s in (specialists or [])}
         self._specialist_context = specialist_context or {}
         self._step_emitter = step_emitter or NullStepEmitter()
+        self._mcp = mcp_client
         self._builtin_tools: dict[str, dict] = {}
         self._cypher_tools: dict[str, dict] = {}
         self._pg_tools: dict[str, dict] = {}
         self._specialist_tools: dict[str, dict] = {}
+        self._mcp_tools: dict[str, dict] = {}
         self._build()
+
+    async def load_mcp_tools(self) -> None:
+        """Fetch tool definitions from the MCP server. Call once after construction.
+
+        Best-effort: if the MCP server is unreachable, logs and leaves
+        _mcp_tools empty rather than failing the whole registry — matches
+        this codebase's fail-closed-on-the-feature/fail-open-on-availability
+        convention elsewhere (e.g. providers/*_scraper.py falling back to
+        mock data on fetch failure), so a down MCP server degrades to
+        "no search tools" instead of breaking Cypher/Postgres/specialist
+        tool-calling too.
+        """
+        if self._mcp is None:
+            return
+        try:
+            tools = await self._mcp.list_tools()
+        except Exception:
+            logger.exception("Failed to load MCP tool definitions — MCP tools unavailable this turn")
+            return
+
+        for t in tools:
+            name = t["name"]
+            if self._enabled and name not in self._enabled:
+                continue
+            self._mcp_tools[name] = {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": t["description"],
+                    "parameters": t["input_schema"],
+                },
+            }
 
     def _build(self) -> None:
         """Build tool definitions from available executors."""
@@ -155,6 +205,7 @@ class ToolRegistry:
             + list(self._cypher_tools.values())
             + list(self._pg_tools.values())
             + list(self._specialist_tools.values())
+            + list(self._mcp_tools.values())
         )
 
     def tool_names(self) -> list[str]:
@@ -164,6 +215,7 @@ class ToolRegistry:
             + list(self._cypher_tools.keys())
             + list(self._pg_tools.keys())
             + list(self._specialist_tools.keys())
+            + list(self._mcp_tools.keys())
         )
 
     async def execute(self, tool_call: dict[str, Any]) -> ToolResult:
@@ -197,6 +249,8 @@ class ToolRegistry:
             return await self._execute_postgres(call_id, name, args)
         if name in self._specialist_tools:
             return await self._execute_specialist(call_id, name, args)
+        if name in self._mcp_tools and self._mcp:
+            return await self._execute_mcp(call_id, name, args)
 
         return ToolResult(
             tool_call_id=call_id,
@@ -289,6 +343,30 @@ class ToolRegistry:
                 tool_call_id=call_id,
                 name=name,
                 content=f"Query failed: {type(exc).__name__}: {exc}",
+                success=False,
+            )
+
+    async def _execute_mcp(
+        self, call_id: str, name: str, args: dict[str, Any]
+    ) -> ToolResult:
+        """Execute an MCP tool call (search_flights, check_budget, etc)."""
+        try:
+            result = await self._mcp.call_tool(name, args)
+            result_json = json.dumps(result, default=str)
+            if len(result_json) > _MAX_RESULT_CHARS:
+                result_json = result_json[:_MAX_RESULT_CHARS] + "...[truncated]"
+            return ToolResult(
+                tool_call_id=call_id, name=name, content=result_json, success=True
+            )
+        except MCPToolError as exc:
+            return ToolResult(
+                tool_call_id=call_id, name=name, content=str(exc), success=False,
+            )
+        except Exception as exc:
+            return ToolResult(
+                tool_call_id=call_id,
+                name=name,
+                content=f"MCP call failed: {type(exc).__name__}: {exc}",
                 success=False,
             )
 

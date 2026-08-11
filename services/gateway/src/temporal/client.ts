@@ -8,6 +8,7 @@ import { env } from "../config/env.js";
  *   @workflow.signal confirm()
  *   @workflow.signal reject()
  *   @workflow.signal request_changes(edit: ItineraryEditRequest)
+ *   @workflow.signal rate_segment(rating: SegmentRating)
  *   @workflow.query  current_itinerary() -> ItineraryResult | None
  *   @workflow.query  available_options() -> dict[str, list[dict]]
  *   @workflow.query  edit_log() -> list[str]
@@ -112,5 +113,31 @@ export async function signalRequestChanges(
     section: edit.section,
     candidate_id: edit.candidateId,
     note: edit.note ?? null,
+  });
+}
+
+export interface SegmentRatingInput {
+  section: string;
+  candidateId: string;
+  rating: number;
+}
+
+/**
+ * A 1-5 star rating for a specific candidate — feeds
+ * providers/ranking/bandit.py::reward_from_rating instead of the coarse
+ * accept/reject-only reward. Doesn't alter the itinerary; purely a
+ * preference signal, unlike request_changes.
+ */
+export async function signalRateSegment(
+  planId: string,
+  rating: SegmentRatingInput
+): Promise<void> {
+  const handle = await handleFor(planId);
+  // itinerary_workflow.py's rate_segment signal takes one SegmentRating
+  // argument; field names are translated snake_case for the Python side.
+  await handle.signal("rate_segment", {
+    section: rating.section,
+    candidate_id: rating.candidateId,
+    rating: rating.rating,
   });
 }

@@ -68,8 +68,9 @@ class RankingWeights:
 
 @dataclass
 class RecommendationEvent:
-    """One accept/reject signal tied to a specific candidate and the arm
-    (primitive/bandit) that produced it — the reward the bandit learns from.
+    """One accept/reject (optionally rated) signal tied to a specific
+    candidate and the arm (primitive/bandit) that produced it — the reward
+    the bandit learns from.
     """
 
     event_id: str
@@ -77,8 +78,13 @@ class RecommendationEvent:
     tenant_id: str
     section: str  # "flight" | "hotel" | "restaurant" | "attraction"
     candidate_id: str
-    action: str  # "accepted" | "rejected"
+    action: str  # "accepted" | "rejected" — coarse bucket, what metrics.py reads
     arm: str  # "primitive" | "bandit"
     features: dict[str, float] = field(default_factory=dict)  # continuous axis scores at decision time
     categorical: dict[str, str] = field(default_factory=dict)  # categorical axis -> tag at decision time
+    # Optional finer-grained signal (1-5). When present, the reward used to
+    # update weights comes from bandit.py::reward_from_rating instead of the
+    # coarse action-only ±1.0 — see conversation: a grudging 3-star accept
+    # shouldn't move weights as much as an enthusiastic 5-star one.
+    rating: int | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())

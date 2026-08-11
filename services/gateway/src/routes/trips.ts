@@ -7,10 +7,12 @@ import {
   queryCurrentItinerary,
   queryEditLog,
   signalConfirm,
+  signalRateSegment,
   signalReject,
   signalRequestChanges,
   startItineraryWorkflow,
 } from "../temporal/client.js";
+import { mapItinerary } from "../temporal/itineraryMapper.js";
 
 export const tripsRouter = Router();
 tripsRouter.use(requireUserId);
@@ -53,8 +55,9 @@ tripsRouter.post("/", async (req, res) => {
 /** FR-PRS-3: ranked options with assumptions, price, and provenance visible to the reviewer. */
 tripsRouter.get("/:planId", async (req, res) => {
   try {
-    const itinerary = await queryCurrentItinerary(req.params.planId);
-    if (itinerary === null || itinerary === undefined) {
+    const raw = await queryCurrentItinerary(req.params.planId);
+    const itinerary = mapItinerary(raw);
+    if (itinerary === null) {
       res.status(404).json({ error: `No itinerary yet for plan ${req.params.planId}` });
       return;
     }
@@ -127,5 +130,29 @@ tripsRouter.post("/:planId/changes", async (req, res) => {
   } catch (err) {
     req.log.error({ err, planId: req.params.planId }, "request_changes signal failed");
     res.status(502).json({ error: "Could not deliver the requested change" });
+  }
+});
+
+const rateSchema = z.object({
+  section: z.string().min(1),
+  candidateId: z.string().min(1),
+  rating: z.number().int().min(1).max(5),
+});
+
+/** A 1-5 star rating for a specific candidate — a preference signal for
+ * providers/ranking/'s bandit arm, distinct from confirm/reject/changes:
+ * it doesn't alter the itinerary itself. */
+tripsRouter.post("/:planId/rate", async (req, res) => {
+  const parsed = rateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid rating request", details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    await signalRateSegment(req.params.planId, parsed.data);
+    res.status(202).json({ planId: req.params.planId, status: "rating_recorded" });
+  } catch (err) {
+    req.log.error({ err, planId: req.params.planId }, "rate_segment signal failed");
+    res.status(502).json({ error: "Could not deliver the rating" });
   }
 });

@@ -29,10 +29,19 @@ class ArmSummary:
     total: int = 0
     accepted: int = 0
     rejected: int = 0
+    rating_sum: int = 0  # only from events that carried an explicit rating
+    rated_count: int = 0
 
     @property
     def acceptance_rate(self) -> float:
         return self.accepted / self.total if self.total else 0.0
+
+    @property
+    def average_rating(self) -> float | None:
+        """None (not 0.0) when no event in this arm carried a rating —
+        distinguishes "nobody's rated anything yet" from "rated 0 stars",
+        which isn't a valid rating anyway."""
+        return self.rating_sum / self.rated_count if self.rated_count else None
 
 
 @dataclass
@@ -64,6 +73,9 @@ def arm_summary(events: list[RecommendationEvent]) -> dict[str, ArmSummary]:
             s.accepted += 1
         else:
             s.rejected += 1
+        if event.rating is not None:
+            s.rating_sum += event.rating
+            s.rated_count += 1
     return summaries
 
 

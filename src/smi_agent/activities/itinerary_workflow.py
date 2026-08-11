@@ -141,6 +141,22 @@ class ItineraryEditRequest:
 _EDITABLE_SECTIONS = {"flight", "hotel", "restaurant", "attraction", "budget"}
 
 
+@dataclass
+class SegmentRating:
+    """A 1-5 star rating for a specific candidate the traveler was shown —
+    a finer-grained companion to confirm/reject/request_changes, feeding
+    providers/ranking/bandit.py::reward_from_rating instead of the coarse
+    ±1.0 accept/reject reward. Doesn't change the itinerary itself (unlike
+    request_changes) — purely a preference signal for future ranking.
+    """
+    section: str  # "flight" | "hotel" | "restaurant" | "attraction"
+    candidate_id: str
+    rating: int  # 1-5
+
+
+_RATABLE_SECTIONS = {"flight", "hotel", "restaurant", "attraction"}
+
+
 # ── Workflow ──────────────────────────────────────────────────────────────────
 
 @workflow.defn
@@ -179,6 +195,7 @@ class ItineraryWorkflow:
         self._rejected = False
         self._pending_edit: ItineraryEditRequest | None = None
         self._edit_log: list[str] = []
+        self._pending_ratings: list[SegmentRating] = []
 
     # ── Signals (traveler → workflow) ───────────────────────────────────────
 
@@ -196,6 +213,16 @@ class ItineraryWorkflow:
             workflow.logger.warning("Ignoring edit for unknown section: %s", edit.section)
             return
         self._pending_edit = edit
+
+    @workflow.signal
+    async def rate_segment(self, rating: SegmentRating) -> None:
+        if rating.section not in _RATABLE_SECTIONS:
+            workflow.logger.warning("Ignoring rating for unknown section: %s", rating.section)
+            return
+        if not 1 <= rating.rating <= 5:
+            workflow.logger.warning("Ignoring out-of-range rating: %s", rating.rating)
+            return
+        self._pending_ratings.append(rating)
 
     # ── Queries (traveler ← workflow, read-only) ────────────────────────────
 
@@ -296,6 +323,33 @@ class ItineraryWorkflow:
                     categorical=top.get("rank_categorical") or {},
                 ))
 
+        return events
+
+    @staticmethod
+    def _rating_feedback_events(
+        ratings: list[SegmentRating], replies: dict[str, list[dict]],
+    ) -> list[RankingFeedbackEvent]:
+        """Look up each rated candidate in the full (already-fetched)
+        candidate list for its section — not in the compiled itinerary,
+        since a rating can be about any option the traveler was shown, not
+        only the one currently selected. A rating for an unknown candidate
+        or one with no ranking attribution (pre-dates this feature, or the
+        section was never ranked) is silently skipped, same as
+        _itinerary_feedback_events does for ungrounded segments.
+        """
+        events: list[RankingFeedbackEvent] = []
+        for r in ratings:
+            candidate = next(
+                (c for c in replies.get(r.section, []) if c.get("id") == r.candidate_id), None,
+            )
+            if candidate is None or not candidate.get("rank_arm"):
+                continue
+            events.append(RankingFeedbackEvent(
+                section=r.section, candidate_id=r.candidate_id,
+                action="accepted" if r.rating >= 3 else "rejected",
+                arm=candidate["rank_arm"], features=candidate.get("rank_features") or {},
+                categorical=candidate.get("rank_categorical") or {}, rating=r.rating,
+            ))
         return events
 
     @workflow.run
@@ -530,7 +584,10 @@ class ItineraryWorkflow:
         while True:
             try:
                 await workflow.wait_condition(
-                    lambda: self._confirmed or self._rejected or self._pending_edit is not None,
+                    lambda: (
+                        self._confirmed or self._rejected
+                        or self._pending_edit is not None or self._pending_ratings
+                    ),
                     timeout=review_deadline,
                 )
             except TimeoutError:
@@ -553,6 +610,13 @@ class ItineraryWorkflow:
                     self._itinerary_feedback_events(self._itinerary, "rejected"),
                 )
                 return ItineraryWorkflowResult(plan_id=input.plan_id, status="rejected", errors=errors)
+
+            if self._pending_ratings:
+                ratings = self._pending_ratings
+                self._pending_ratings = []
+                rating_events = self._rating_feedback_events(ratings, self._replies)
+                await self._record_ranking_feedback(input.user_id, input.tenant_id, rating_events)
+                continue
 
             if self._pending_edit is not None:
                 edit = self._pending_edit

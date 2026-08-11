@@ -45,3 +45,5 @@ logs/
 
 # Trip store (file-backed persistence, see src/smi_agent/trip_store/)
 /data/trips/
+
+CLAUDE.md

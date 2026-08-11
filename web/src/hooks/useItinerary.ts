@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { confirmTrip, getItinerary, rejectTrip, requestTripChanges } from "../api/client";
+import {
+  confirmTrip,
+  getItinerary,
+  rateTripSegment,
+  rejectTrip,
+  requestTripChanges,
+} from "../api/client";
 import type { ItineraryView } from "../api/types";
 
 export function useItinerary(planId: string | null) {
@@ -49,5 +55,15 @@ export function useItinerary(planId: string | null) {
     [planId, refresh]
   );
 
-  return { itinerary, loading, actionState, confirm, reject, requestChanges, refresh };
+  const rateSegment = useCallback(
+    async (section: string, candidateId: string, rating: number) => {
+      if (!planId) return;
+      // Fire-and-forget from the UI's perspective: a rating doesn't change
+      // the itinerary, so there's nothing to refresh — unlike requestChanges.
+      await rateTripSegment(planId, { section, candidateId, rating });
+    },
+    [planId]
+  );
+
+  return { itinerary, loading, actionState, confirm, reject, requestChanges, rateSegment, refresh };
 }

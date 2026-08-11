@@ -147,3 +147,11 @@ export async function requestTripChanges(
   if (planId.startsWith("mock-")) return;
   await send(`/api/v1/trips/${planId}/changes`, "POST", edit);
 }
+
+export async function rateTripSegment(
+  planId: string,
+  rating: { section: string; candidateId: string; rating: number }
+): Promise<void> {
+  if (planId.startsWith("mock-")) return;
+  await send(`/api/v1/trips/${planId}/rate`, "POST", rating);
+}

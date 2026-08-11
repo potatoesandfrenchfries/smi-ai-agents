@@ -239,23 +239,39 @@ export type ChatStreamEvent =
   | { type: "error"; data: string }
   | { type: "done" };
 
-// ── Itinerary / HITL (gateway trips surface) ───────────────────────────────
+// ── Itinerary / HITL (gateway trips surface) ────────────────────────────────
+//
+// Mirrors services/gateway/src/temporal/itineraryMapper.ts's MappedItinerary
+// exactly — that mapper is the only place the raw Python ItineraryResult
+// (snake_case, no aliasing — see its own docstring) gets translated, so this
+// type is a real contract, not an aspirational one. Fields the backend
+// genuinely has no data for (a structured start/end time, a numeric
+// confidence score, a named booking-provider distinct from the airline/
+// hotel itself) are intentionally absent rather than fabricated.
 
 export type PolicyDecision = "compliant" | "breach" | "waived" | "not_applicable" | "pending";
 
 export interface ItinerarySegment {
   id: string;
-  kind: "flight" | "hotel" | "rail" | "car" | "dining" | "activity" | "transfer";
+  /** Which fetched candidate this segment came from — required to rate it
+   * (POST /:planId/rate) or request a change to it. Null only for segments
+   * compiled before this field existed. */
+  candidateId: string | null;
+  kind: "flight" | "hotel" | "attraction" | "dining" | string;
   title: string;
-  subtitle?: string;
-  startsAt?: string | null;
-  endsAt?: string | null;
-  amount: number;
+  subtitle: string | null;
+  amount: number | null;
   currency: string;
   policyDecision: PolicyDecision;
-  confidence: number;
-  snapshotId: string;
-  providerName: string;
+  snapshotId: string | null;
+  /** The specialist's own "why this ranks where it does" text
+   * (providers/explain.py::annotate_reasons) — real, not placeholder. */
+  reason: string | null;
+  handoffLink: string | null;
+  /** Which ranking arm produced this candidate — null means it predates
+   * providers/ranking/ or personalization is off for this user. A segment
+   * can only be rated when this is set (see SegmentTicket's rating control). */
+  rankArm: "primitive" | "bandit" | null;
 }
 
 export interface ItineraryView {

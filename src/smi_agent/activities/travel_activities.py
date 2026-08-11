@@ -485,8 +485,8 @@ async def record_workflow_metric_activity(params: WorkflowMetricParams) -> None:
 
 @dataclass
 class RankingFeedbackEvent:
-    """One accept/reject signal from the HITL review flow — see
-    providers/ranking/models.py::RecommendationEvent, which this becomes.
+    """One accept/reject (optionally rated) signal from the HITL review flow
+    — see providers/ranking/models.py::RecommendationEvent, which this becomes.
     """
     section: str  # "flight" | "hotel" | "restaurant" | "attraction"
     candidate_id: str
@@ -494,6 +494,7 @@ class RankingFeedbackEvent:
     arm: str  # "primitive" | "bandit" — whichever ranked this candidate
     features: dict[str, float] = field(default_factory=dict)  # continuous axis scores at decision time
     categorical: dict[str, str] = field(default_factory=dict)  # categorical axis -> tag at decision time
+    rating: int | None = None  # 1-5, optional finer-grained signal — see RecommendationEvent
 
 
 @dataclass
@@ -526,6 +527,7 @@ async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> Non
         FileRankingStore,
         RecommendationEvent,
         categorical_axis_score,
+        reward_from_rating,
         update_axis_weights,
         update_tag_weight,
     )
@@ -548,8 +550,17 @@ async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> Non
                 arm=event.arm,
                 features=event.features,
                 categorical=event.categorical,
+                rating=event.rating,
             ))
-            reward = 1.0 if event.action == "accepted" else -1.0
+            # A rating, when present, replaces the coarse ±1.0 action-only
+            # reward with the finer -1..+1 scale reward_from_rating gives —
+            # a grudging 3-star accept shouldn't move weights as much as an
+            # enthusiastic 5-star one (see conversation).
+            reward = (
+                reward_from_rating(event.rating)
+                if event.rating is not None
+                else (1.0 if event.action == "accepted" else -1.0)
+            )
 
             axis_scores = dict(event.features)
             for axis, tag in event.categorical.items():

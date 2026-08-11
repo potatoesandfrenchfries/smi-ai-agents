@@ -26,9 +26,10 @@ async def show_metrics(bucket_size: int) -> None:
 
     print("Acceptance rate by arm (between-group: is bandit beating primitive overall?):")
     for arm, s in sorted(result["arm_summary"].items()):
+        rating_str = f"avg_rating={s.average_rating:.1f}" if s.average_rating is not None else "avg_rating=n/a"
         print(
             f"  {arm:10s} accepted={s.accepted:<4d} rejected={s.rejected:<4d} "
-            f"total={s.total:<4d} rate={s.acceptance_rate:.1%}"
+            f"total={s.total:<4d} rate={s.acceptance_rate:.1%}  {rating_str}"
         )
 
     print(

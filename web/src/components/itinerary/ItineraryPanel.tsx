@@ -1,4 +1,4 @@
-import type { ItineraryView } from "../../api/types";
+import type { ItinerarySegment, ItineraryView } from "../../api/types";
 import { PolicyBadge } from "../common/PolicyBadge";
 import { HitlActionBar } from "./HitlActionBar";
 import { SegmentTicket } from "./SegmentTicket";
@@ -12,6 +12,7 @@ export function ItineraryPanel({
   onConfirm,
   onReject,
   onRequestChange,
+  onRate,
   onStartTrip,
   startingTrip,
 }: {
@@ -21,6 +22,7 @@ export function ItineraryPanel({
   onConfirm: () => void;
   onReject: () => void;
   onRequestChange: (segmentId: string) => void;
+  onRate?: (segment: ItinerarySegment, rating: number) => void;
   onStartTrip: (rawGoal: string) => void;
   startingTrip: boolean;
 }) {
@@ -67,6 +69,7 @@ export function ItineraryPanel({
             segment={segment}
             sequence={i + 1}
             onRequestChange={(s) => onRequestChange(s.id)}
+            onRate={onRate}
           />
         ))}
       </div>

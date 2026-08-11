@@ -36,6 +36,20 @@ _LEARNING_RATE = 0.15
 _MIN_WEIGHT = 0.01
 
 
+def reward_from_rating(rating: int) -> float:
+    """Map a 1-5 star rating onto the same -1..+1 reward scale plain
+    accept/reject events use: 1->-1.0, 2->-0.5, 3->0.0, 4->+0.5, 5->+1.0.
+
+    A rating of exactly 3 contributes zero reward — genuinely neutral,
+    neither reinforcing nor discouraging the axes/tags involved — rather
+    than being forced into "accepted" or "rejected" the way the coarse
+    action field has to be. Clamped to 1..5 in case a caller passes
+    something out of range.
+    """
+    rating = max(1, min(5, rating))
+    return (rating - 3) / 2.0
+
+
 def update_axis_weights(
     current: RankingWeights, axis_scores: dict[str, float], reward: float,
 ) -> RankingWeights:

@@ -1,5 +1,6 @@
 from smi_agent.providers.ranking.bandit import (
     categorical_axis_score,
+    reward_from_rating,
     update_axis_weights,
     update_tag_weight,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "extract_categorical",
     "rank_candidates",
     "relevance_trend",
+    "reward_from_rating",
     "score_candidates",
     "select_arm",
     "summarize",

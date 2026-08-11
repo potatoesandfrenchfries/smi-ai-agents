@@ -53,6 +53,10 @@ export default function App() {
           onRequestChange={(segmentId) =>
             itineraryState.requestChanges("segment", segmentId, "Requested from console")
           }
+          onRate={(segment, rating) => {
+            if (!segment.candidateId) return;
+            void itineraryState.rateSegment(segment.kind, segment.candidateId, rating);
+          }}
           onStartTrip={handleStartTrip}
           startingTrip={startingTrip}
         />

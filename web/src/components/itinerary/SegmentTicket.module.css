@@ -48,6 +48,13 @@
   color: var(--paper-text-dim);
 }
 
+.reason {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--paper-text-dim);
+}
+
 .footer {
   margin-top: auto;
   padding-top: var(--space-2);
@@ -74,6 +81,27 @@
   text-underline-offset: 2px;
 }
 .swapButton:hover {
+  color: color-mix(in srgb, var(--teal) 80%, black);
+}
+
+.rating {
+  display: flex;
+  gap: 2px;
+}
+
+.star {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--paper-text-dim);
+}
+.star[data-filled="true"] {
+  color: var(--teal);
+}
+.star:hover {
   color: color-mix(in srgb, var(--teal) 80%, black);
 }
 

@@ -81,6 +81,17 @@ Unset `SMI_AGENT_QUEUE` runs everything in one process (monolithic dev mode).
 - `observability/metrics.py` — Prometheus metrics; `api` exposes `/metrics`,
   the worker exposes its own on `SMI_WORKER_METRICS_PORT` (default 9100).
 
+## Ranking feedback loop
+
+- `providers/ranking/` — accept/reject, ratings, and candidate-swap feedback
+  (captured via signals on `activities/itinerary_workflow.py`) flow through
+  `record_ranking_feedback_activity` (`activities/travel_activities.py`) into
+  `bandit.py`'s weight updates. **Budget-change feedback is not wired**: the
+  workflow signal handler has a `section == "budget"` branch ready for it,
+  but the gateway's `changesSchema`/`ItineraryEditRequest`
+  (`services/gateway/src/routes/trips.ts`, `temporal/client.ts`) only accept
+  a `candidateId` field, so no live caller can send a budget edit yet.
+
 ## Local dev
 
 ```bash

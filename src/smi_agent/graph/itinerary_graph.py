@@ -1063,6 +1063,13 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "reason": _reason(best_flight.get("reason")),
             "provenance": (flight.get("provenance") or [])[:1],
             "handoff_link": f"https://book.smartinerary.io/flight/{best_flight.get('id', 'TBC')}",
+            # Feedback attribution (providers/ranking/): which candidate this
+            # segment came from and how it was ranked, so a later HITL
+            # confirm/reject/edit can be fed back to the ranking arm that
+            # produced it.
+            "candidate_id": best_flight.get("id"),
+            "rank_arm": best_flight.get("rank_arm"),
+            "rank_features": best_flight.get("rank_features"),
         },
         {
             "type": "hotel",
@@ -1073,6 +1080,9 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "reason": _reason(best_hotel.get("reason")),
             "provenance": (hotel.get("provenance") or [])[:1],
             "handoff_link": f"https://book.smartinerary.io/hotel/{best_hotel.get('id', 'TBC')}",
+            "candidate_id": best_hotel.get("id"),
+            "rank_arm": best_hotel.get("rank_arm"),
+            "rank_features": best_hotel.get("rank_features"),
         },
     ]
 
@@ -1086,6 +1096,12 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "reason": _reason(best_attractions[0].get("reason")) if best_attractions else None,
             "provenance": (attraction.get("provenance") or [])[:3],
             "handoff_link": None,
+            # Attributed to the top-ranked attraction only, even though the
+            # segment summarizes up to 3 — same "best_attractions[0] is
+            # representative" convention _reason already follows above.
+            "candidate_id": best_attractions[0].get("id"),
+            "rank_arm": best_attractions[0].get("rank_arm"),
+            "rank_features": best_attractions[0].get("rank_features"),
         })
 
     itinerary = {

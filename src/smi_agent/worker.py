@@ -71,6 +71,7 @@ from smi_agent.activities.travel_activities import (
     itinerary_generation_activity,
     parse_trip_intent_activity,
     persist_trip_activity,
+    record_ranking_feedback_activity,
     record_workflow_metric_activity,
     restaurant_search_activity,
 )
@@ -86,7 +87,7 @@ AGENT_QUEUES: dict[str, list] = {
     RESTAURANT_QUEUE: [restaurant_search_activity],
     ATTRACTION_QUEUE: [attraction_search_activity],
     ITINERARY_GENERATION_QUEUE: [itinerary_generation_activity, parse_trip_intent_activity],
-    CORE_SERVICES_QUEUE: [persist_trip_activity, record_workflow_metric_activity],
+    CORE_SERVICES_QUEUE: [persist_trip_activity, record_workflow_metric_activity, record_ranking_feedback_activity],
 }
 
 TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "localhost:7233")

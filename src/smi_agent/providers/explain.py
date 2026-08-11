@@ -46,6 +46,54 @@ def annotate_reasons(
     ]
 
 
+def annotate_reasons_personalized(
+    candidates: list[dict[str, Any]],
+    *,
+    weights: Any,
+    price_field: str | None = None,
+    rating_field: str | None = None,
+    proximity_field: str | None = None,
+) -> list[dict[str, Any]]:
+    """Like ``annotate_reasons``, but ranks by a per-user learned blend over
+    normalized features (see providers/ranking/) instead of a single
+    ``sort_by`` criterion — the personalized ranking arm.
+
+    Unlike ``annotate_reasons``, which trusts the provider's own ordering
+    and only annotates, this re-sorts by blended score descending: a
+    personalized order has no other source of truth to defer to. ``weights``
+    is a ``RankingWeights`` (or any object/mapping providing the same
+    price/rating/proximity keys) — typed loosely here to avoid a module-level
+    import cycle with providers/ranking.
+    """
+    from smi_agent.providers.ranking.features import blend, score_candidates
+
+    if not candidates:
+        return candidates
+
+    n = len(candidates)
+    feature_scores = score_candidates(
+        candidates, price_field=price_field, rating_field=rating_field, proximity_field=proximity_field,
+    )
+    weights_dict = weights.as_dict() if hasattr(weights, "as_dict") else dict(weights)
+    scored = sorted(
+        zip(candidates, feature_scores, strict=True),
+        key=lambda pair: blend(pair[1], weights_dict),
+        reverse=True,
+    )
+
+    top_feature = max(weights_dict, key=weights_dict.get)
+    return [
+        {**c, "reason": _personalized_reason(i == 0, top_feature, n)}
+        for i, (c, _feats) in enumerate(scored)
+    ]
+
+
+def _personalized_reason(is_best: bool, top_feature: str, n: int) -> str:
+    if is_best:
+        return f"Best match for your usual preferences, weighted most on {top_feature} (of {n} option(s) considered)"
+    return f"Alternative option ranked by your usual preferences (of {n} option(s) considered)"
+
+
 def _find_best(
     candidates: list[dict[str, Any]],
     sort_by: str,

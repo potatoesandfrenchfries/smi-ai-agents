@@ -79,6 +79,9 @@ class ItineraryParams:
     plan_id: str
     tenant_id: str
     raw_goal: str
+    # Empty when the caller has no traveler identity (e.g. scripts/demo.py) —
+    # ranking then falls back to the primitive arm (see rank_candidates).
+    user_id: str = ""
     origin: str = ""
     destination: str = ""
     check_in: str = ""
@@ -277,6 +280,7 @@ async def itinerary_generation_activity(params: ItineraryParams) -> ItineraryRes
 
 
 async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
+    import os
     import uuid
 
     from smi_agent.graph.itinerary_graph import (
@@ -285,29 +289,44 @@ async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
         near_hotel_note,
     )
     from smi_agent.graph.state import TaskReply
-    from smi_agent.providers.explain import annotate_reasons
+    from smi_agent.providers.ranking import FileRankingStore, rank_candidates
 
     activity.logger.info("Generating itinerary for plan %s", params.plan_id)
 
     graph = build_itinerary_graph()
 
-    # Explainability (per-candidate `reason`): these activities call the
-    # provider registry directly (not the graph's run_*_search wrappers), so
-    # the same annotate_reasons pass has to happen here too.
+    # Personalized ranking (providers/ranking/): each user_id is
+    # deterministically assigned to the primitive or bandit arm via
+    # SMI_RANKING_ROLLOUT_PCT (0-100, default 0 = fully primitive until
+    # explicitly rolled out). Falls back to primitive automatically when
+    # user_id is empty (e.g. scripts/demo.py has no traveler identity).
+    ranking_store = FileRankingStore()
+    rollout_pct = float(os.environ.get("SMI_RANKING_ROLLOUT_PCT", "0"))
+
     flight_sort_by = params.sort_by
     hotel_sort_by = "rating" if params.sort_by == "comfort" else "price"
     attraction_sort_by = "price" if params.sort_by == "cost" else "rating"
 
-    flights = annotate_reasons(params.flights, sort_by=flight_sort_by, price_field="price_gbp")
-    hotels = annotate_reasons(
+    flights, flight_arm = await rank_candidates(
+        params.flights, sort_by=flight_sort_by, price_field="price_gbp",
+        user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
+    )
+    hotels, hotel_arm = await rank_candidates(
         params.hotels, sort_by=hotel_sort_by, price_field="total_price_gbp",
         rating_field="rating", proximity_field="distance_from_centre_km",
+        user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
     )
-    restaurants = annotate_reasons(
+    restaurants, restaurant_arm = await rank_candidates(
         params.restaurants, sort_by="rating", price_field="avg_spend_per_person_gbp", rating_field="rating",
+        user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
     )
-    attractions = annotate_reasons(
+    attractions, attraction_arm = await rank_candidates(
         params.attractions, sort_by=attraction_sort_by, price_field="entry_fee_gbp", rating_field="rating",
+        user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
+    )
+    activity.logger.info(
+        "Ranking arms for plan %s — flight=%s hotel=%s restaurant=%s attraction=%s",
+        params.plan_id, flight_arm, hotel_arm, restaurant_arm, attraction_arm,
     )
 
     # Agent-to-agent handoff (FR-ORC-4): the flight/hotel data
@@ -459,3 +478,65 @@ async def record_workflow_metric_activity(params: WorkflowMetricParams) -> None:
     from smi_agent.observability.metrics import WORKFLOW_EXECUTIONS_TOTAL
 
     WORKFLOW_EXECUTIONS_TOTAL.labels(workflow=params.workflow_name, status=params.status).inc()
+
+
+@dataclass
+class RankingFeedbackEvent:
+    """One accept/reject signal from the HITL review flow — see
+    providers/ranking/models.py::RecommendationEvent, which this becomes.
+    """
+    section: str  # "flight" | "hotel" | "restaurant" | "attraction"
+    candidate_id: str
+    action: str  # "accepted" | "rejected"
+    arm: str  # "primitive" | "bandit" — whichever ranked this candidate
+    features: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class RankingFeedbackParams:
+    user_id: str
+    tenant_id: str
+    events: list[RankingFeedbackEvent] = field(default_factory=list)
+
+
+@activity.defn
+async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> None:
+    """Persist HITL accept/reject events and update the user's learned
+    ranking weights from them — the write side of providers/ranking/.
+
+    Must be called as an activity: it does file I/O, which workflow.run()
+    (replayed deterministically from history) can never do directly — same
+    reason persist_trip_activity and record_workflow_metric_activity are
+    activities rather than inline workflow code.
+    """
+    import uuid
+
+    from smi_agent.observability.metrics import track_agent_execution
+    from smi_agent.providers.ranking import FileRankingStore, RecommendationEvent, update_weights
+
+    if not params.events or not params.user_id:
+        return
+
+    with track_agent_execution("record_ranking_feedback"):
+        store = FileRankingStore()
+        weights = await store.get_weights(params.user_id)
+
+        for event in params.events:
+            await store.record_event(RecommendationEvent(
+                event_id=str(uuid.uuid4()),
+                user_id=params.user_id,
+                tenant_id=params.tenant_id,
+                section=event.section,
+                candidate_id=event.candidate_id,
+                action=event.action,
+                arm=event.arm,
+                features=event.features,
+            ))
+            reward = 1.0 if event.action == "accepted" else -1.0
+            weights = update_weights(weights, event.features, reward)
+
+        await store.save_weights(params.user_id, weights)
+        activity.logger.info(
+            "Recorded %d ranking feedback event(s) for user %s — weights now %s (n=%d)",
+            len(params.events), params.user_id, weights.as_dict(), weights.event_count,
+        )

@@ -70,6 +70,8 @@ with workflow.unsafe.imports_passed_through():
         ItineraryParams,
         ItineraryResult,
         PersistTripParams,
+        RankingFeedbackEvent,
+        RankingFeedbackParams,
         RestaurantSearchParams,
         TripIntentParams,
         TripIntentResult,
@@ -80,6 +82,7 @@ with workflow.unsafe.imports_passed_through():
         itinerary_generation_activity,
         parse_trip_intent_activity,
         persist_trip_activity,
+        record_ranking_feedback_activity,
         record_workflow_metric_activity,
         restaurant_search_activity,
     )
@@ -239,6 +242,59 @@ class ItineraryWorkflow:
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=_default_retry(),
         )
+
+    async def _record_ranking_feedback(
+        self, user_id: str, tenant_id: str, events: list[RankingFeedbackEvent],
+    ) -> None:
+        """Feed HITL accept/reject signals back to providers/ranking/ so the
+        bandit arm learns from them, regardless of which arm produced the
+        recommendation being reacted to. Best-effort: a failure here should
+        never take down the review flow the traveler is actually waiting on.
+        """
+        if not events:
+            return
+        try:
+            await workflow.execute_activity(
+                record_ranking_feedback_activity,
+                RankingFeedbackParams(user_id=user_id, tenant_id=tenant_id, events=events),
+                task_queue=CORE_SERVICES_QUEUE,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=_default_retry(),
+            )
+        except Exception as exc:
+            workflow.logger.warning("Ranking feedback recording failed (non-fatal): %s", exc)
+
+    @staticmethod
+    def _itinerary_feedback_events(itinerary: ItineraryResult, action: str) -> list[RankingFeedbackEvent]:
+        """One event per section that actually carries ranking attribution —
+        segments/dining options with no candidate_id or rank_arm (e.g. a
+        section with no results) are silently skipped rather than recorded
+        with garbage data. Flight/hotel/attraction come from `segments`;
+        restaurant isn't a segment (it's surfaced separately as
+        `dining_options` — see compile_itinerary) so its top pick is read
+        from there instead.
+        """
+        events: list[RankingFeedbackEvent] = []
+
+        for seg in itinerary.segments:
+            candidate_id = seg.get("candidate_id")
+            arm = seg.get("rank_arm")
+            if not candidate_id or not arm:
+                continue
+            events.append(RankingFeedbackEvent(
+                section=seg["type"], candidate_id=candidate_id, action=action,
+                arm=arm, features=seg.get("rank_features") or {},
+            ))
+
+        if itinerary.dining_options:
+            top = itinerary.dining_options[0]
+            if top.get("id") and top.get("rank_arm"):
+                events.append(RankingFeedbackEvent(
+                    section="restaurant", candidate_id=top["id"], action=action,
+                    arm=top["rank_arm"], features=top.get("rank_features") or {},
+                ))
+
+        return events
 
     @workflow.run
     async def run(self, input: ItineraryWorkflowInput) -> ItineraryWorkflowResult:
@@ -419,6 +475,7 @@ class ItineraryWorkflow:
                 ItineraryParams(
                     plan_id=input.plan_id,
                     tenant_id=input.tenant_id,
+                    user_id=input.user_id,
                     raw_goal=input.raw_goal,
                     origin=origin,
                     destination=destination,
@@ -489,6 +546,10 @@ class ItineraryWorkflow:
             if self._rejected:
                 workflow.logger.info("Itinerary rejected by traveler")
                 await self._record_metric("rejected")
+                await self._record_ranking_feedback(
+                    input.user_id, input.tenant_id,
+                    self._itinerary_feedback_events(self._itinerary, "rejected"),
+                )
                 return ItineraryWorkflowResult(plan_id=input.plan_id, status="rejected", errors=errors)
 
             if self._pending_edit is not None:
@@ -505,12 +566,27 @@ class ItineraryWorkflow:
                     self._replies[edit.section] = _reorder_to_front(before, edit.candidate_id)
                     self._edit_log.append(f"{edit.section} → {edit.candidate_id}")
 
+                    # A deliberate pick is an unambiguous positive signal —
+                    # the traveler explicitly chose this candidate over
+                    # whatever the compiled itinerary had, regardless of
+                    # which arm produced either one.
+                    picked = next((c for c in before if c.get("id") == edit.candidate_id), None)
+                    if picked is not None and picked.get("rank_arm"):
+                        await self._record_ranking_feedback(
+                            input.user_id, input.tenant_id,
+                            [RankingFeedbackEvent(
+                                section=edit.section, candidate_id=edit.candidate_id, action="accepted",
+                                arm=picked["rank_arm"], features=picked.get("rank_features") or {},
+                            )],
+                        )
+
                 try:
                     self._itinerary = await workflow.execute_activity(
                         itinerary_generation_activity,
                         ItineraryParams(
                             plan_id=input.plan_id,
                             tenant_id=input.tenant_id,
+                            user_id=input.user_id,
                             raw_goal=input.raw_goal,
                             flights=self._replies.get("flight", []),
                             hotels=self._replies.get("hotel", []),
@@ -550,6 +626,10 @@ class ItineraryWorkflow:
         )
 
         await self._record_metric("confirmed")
+        await self._record_ranking_feedback(
+            input.user_id, input.tenant_id,
+            self._itinerary_feedback_events(self._itinerary, "accepted"),
+        )
 
         # Persist so this trip can be looked up from a later, unrelated
         # conversation (e.g. a NYC trip started after this Japan one) —

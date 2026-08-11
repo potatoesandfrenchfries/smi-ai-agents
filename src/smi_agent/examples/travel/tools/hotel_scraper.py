@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 # TTL is safe and cuts repeat Overpass queries for the same stay.
 _CACHE_TTL_SECONDS = 1800
 
+# OSM tourism tag values this scraper's Overpass query filters on — also the
+# lodging_type tag set the personalized ranking arm learns over (see
+# providers/ranking/models.py::CATEGORICAL_AXES). No "villa"/"apartment": OSM
+# tags those under a different key (building=apartments), not tourism=hotel,
+# so this scraper can't back that tag with real data yet.
+_OSM_TOURISM_VALUES = ("hotel", "guest_house", "hostel", "motel")
+
+# Weighted so mock results skew realistic — most stays are hotels, hostels
+# and motels are less common at the price points _CITY_HOTELS represents.
+_LODGING_TYPE_WEIGHTS = (0.6, 0.2, 0.15, 0.05)
+
 HOTEL_NAMES = [
     # Generic / European
     "The Grand", "City Suites", "Harbour View", "Central Plaza",
@@ -91,10 +102,12 @@ def _seeded_hotels(location: str, check_in: str, check_out: str) -> list[dict[st
         price_per_night = round(rng.uniform(*price_range) * (stars / 3), 2)
         distance_km = round(rng.uniform(0.2, 8.0), 1)
         amenities = rng.sample(AMENITIES_POOL, k=rng.randint(3, 6))
+        lodging_type = rng.choices(_OSM_TOURISM_VALUES, weights=_LODGING_TYPE_WEIGHTS, k=1)[0]
         results.append({
             "id": f"HTL-{seed % 10000:04d}-{i}",
             "name": name,
             "location": location,
+            "lodging_type": lodging_type,
             "stars": stars,
             "rating": rating,
             "review_count": rng.randint(50, 3000),
@@ -139,8 +152,8 @@ async def search_hotels(
         num_results: Maximum number of results to return (default 5).
 
     Returns:
-        List of hotel dicts, each with: id, name, stars, rating, price_per_night_gbp,
-        total_price_gbp, nights, distance_from_centre_km, amenities.
+        List of hotel dicts, each with: id, name, lodging_type, stars, rating,
+        price_per_night_gbp, total_price_gbp, nights, distance_from_centre_km, amenities.
     """
     hotels = await _fetch_hotels(location, check_in, check_out)
     hotels = _sort(hotels, sort_by)
@@ -158,9 +171,6 @@ async def search_hotels_mock(
     hotels = _seeded_hotels(location, check_in, check_out)
     hotels = _sort(hotels, sort_by)
     return hotels[:num_results]
-
-
-_OSM_TOURISM_VALUES = ("hotel", "guest_house", "hostel", "motel")
 
 
 async def _fetch_hotels(location: str, check_in: str, check_out: str) -> list[dict[str, Any]]:
@@ -235,10 +245,14 @@ def _normalise_overpass(
         if tags.get("smoking") == "no":
             amenities.append("Non-smoking")
 
+        # The query already filters on tourism=hotel|guest_house|hostel|motel
+        # (_OSM_TOURISM_VALUES) — surface the actual matched value instead of
+        # discarding it, so the personalized ranking arm can learn from it.
         results.append({
             "id": f"OSM-{el.get('id', i)}",
             "name": tags.get("name", "Unnamed Hotel"),
             "location": location,
+            "lodging_type": tags.get("tourism", "hotel"),
             "stars": _parse_int(tags.get("stars")),
             "rating": None,
             "review_count": None,

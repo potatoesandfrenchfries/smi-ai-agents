@@ -15,7 +15,7 @@ import hashlib
 import logging
 from typing import Any, Literal
 
-from smi_agent.providers.ranking.features import score_candidates
+from smi_agent.providers.ranking.features import extract_categorical, score_candidates
 from smi_agent.providers.ranking.interface import RankingStore
 
 logger = logging.getLogger(__name__)
@@ -44,16 +44,22 @@ async def rank_candidates(
     price_field: str | None = None,
     rating_field: str | None = None,
     proximity_field: str | None = None,
+    categorical_fields: dict[str, str] | None = None,
     user_id: str | None,
     store: RankingStore | None,
     rollout_pct: float = 0.0,
 ) -> tuple[list[dict[str, Any]], Arm]:
     """Rank+annotate candidates via whichever arm this user is assigned to.
 
+    ``categorical_fields`` maps axis name -> candidate dict key, e.g.
+    {"cuisine": "cuisine"} for restaurant search; omit for sections with no
+    categorical axis (flight, hotel, attraction today).
+
     Returns (ranked_candidates, arm_used). Every returned candidate carries
-    ``rank_arm`` and ``rank_features`` — feedback capture reads these back
-    when the traveler later accepts/rejects/edits, so the bandit can learn
-    regardless of which arm actually produced the recommendation.
+    ``rank_arm``, ``rank_features`` (continuous axis scores), and
+    ``rank_categorical`` (categorical axis -> tag) — feedback capture reads
+    these back when the traveler later accepts/rejects/edits, so the bandit
+    can learn regardless of which arm actually produced the recommendation.
     """
     from smi_agent.providers.explain import annotate_reasons, annotate_reasons_personalized
 
@@ -63,7 +69,9 @@ async def rank_candidates(
     feature_scores = score_candidates(
         candidates, price_field=price_field, rating_field=rating_field, proximity_field=proximity_field,
     )
+    categorical_values = extract_categorical(candidates, field_map=categorical_fields or {})
     features_by_id = {c.get("id"): feature_scores[i] for i, c in enumerate(candidates)}
+    categorical_by_id = {c.get("id"): categorical_values[i] for i, c in enumerate(candidates)}
 
     arm: Arm = select_arm(user_id, rollout_pct) if (user_id and store is not None) else "primitive"
 
@@ -73,6 +81,7 @@ async def rank_candidates(
             ranked = annotate_reasons_personalized(
                 candidates, weights=weights,
                 price_field=price_field, rating_field=rating_field, proximity_field=proximity_field,
+                categorical_fields=categorical_fields,
             )
         except Exception:
             logger.warning("bandit arm failed for user_id=%r — falling back to primitive", user_id, exc_info=True)
@@ -88,6 +97,11 @@ async def rank_candidates(
         )
 
     return [
-        {**c, "rank_arm": arm, "rank_features": features_by_id.get(c.get("id"), {})}
+        {
+            **c,
+            "rank_arm": arm,
+            "rank_features": features_by_id.get(c.get("id"), {}),
+            "rank_categorical": categorical_by_id.get(c.get("id"), {}),
+        }
         for c in ranked
     ], arm

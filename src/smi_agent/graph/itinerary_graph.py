@@ -1070,6 +1070,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "candidate_id": best_flight.get("id"),
             "rank_arm": best_flight.get("rank_arm"),
             "rank_features": best_flight.get("rank_features"),
+            "rank_categorical": best_flight.get("rank_categorical"),
         },
         {
             "type": "hotel",
@@ -1083,6 +1084,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "candidate_id": best_hotel.get("id"),
             "rank_arm": best_hotel.get("rank_arm"),
             "rank_features": best_hotel.get("rank_features"),
+            "rank_categorical": best_hotel.get("rank_categorical"),
         },
     ]
 
@@ -1102,6 +1104,7 @@ async def compile_itinerary(state: ItineraryState) -> dict:
             "candidate_id": best_attractions[0].get("id"),
             "rank_arm": best_attractions[0].get("rank_arm"),
             "rank_features": best_attractions[0].get("rank_features"),
+            "rank_categorical": best_attractions[0].get("rank_categorical"),
         })
 
     itinerary = {

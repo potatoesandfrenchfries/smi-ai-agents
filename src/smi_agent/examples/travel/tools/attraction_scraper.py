@@ -29,6 +29,37 @@ CATEGORIES = [
     "Market", "Viewpoint", "Cultural Experience", "Religious Site", "Adventure",
 ]
 
+# Maps every real category value (mock and live-OSM alike) onto the coarse
+# attraction_type tag set the personalized ranking arm learns over — see
+# providers/ranking/models.py::CATEGORICAL_AXES. Deliberately lossy: a
+# smaller tag set means the bandit needs far fewer accept/reject events
+# before a preference is distinguishable from noise (see conversation on
+# categorical dilution). Keys are lowercased for case-insensitive lookup —
+# extract_categorical() also lowercases before this dict would ever see it,
+# but this module builds "attraction_type" directly, so it does its own.
+_ATTRACTION_TYPE_MAP: dict[str, str] = {
+    # Mock CATEGORIES
+    "landmark": "monument",
+    "historic site": "monument",
+    "religious site": "monument",
+    "museum": "museum",
+    "gallery": "museum",
+    "park": "park",
+    "viewpoint": "park",
+    "market": "entertainment",
+    "cultural experience": "entertainment",
+    "adventure": "entertainment",
+    # Live-OSM tourism values, after _normalise_overpass's replace("_", " ").title()
+    "attraction": "entertainment",
+    "artwork": "monument",
+    "zoo": "entertainment",
+    "theme park": "entertainment",
+}
+
+
+def _attraction_type(category: str) -> str:
+    return _ATTRACTION_TYPE_MAP.get(category.lower(), "entertainment")
+
 TAGS_POOL = [
     "sightseeing", "culture", "relaxation", "family-friendly",
     "outdoor", "indoor", "free-entry", "photo-spot", "adventure", "history",
@@ -143,6 +174,7 @@ def _seeded_attractions(location: str) -> list[dict[str, Any]]:
             "id": f"ATT-{seed % 10000:04d}-{i}",
             "name": name,
             "category": category,
+            "attraction_type": _attraction_type(category),
             "location": location,
             "rating": round(rng.uniform(7.5, 9.9), 1),
             "review_count": rng.randint(50, 5000),
@@ -177,9 +209,9 @@ async def search_attractions(
         num_results: Maximum number of results to return (default 5).
 
     Returns:
-        List of attraction dicts, each with: id, name, category, rating,
-        entry_fee_gbp, duration_hours, distance_from_centre_km, tags,
-        recommended_time_of_day, highlight.
+        List of attraction dicts, each with: id, name, category,
+        attraction_type, rating, entry_fee_gbp, duration_hours,
+        distance_from_centre_km, tags, recommended_time_of_day, highlight.
     """
     attractions = await _fetch_attractions(location)
     attractions = _sort(attractions, sort_by)
@@ -226,10 +258,12 @@ def _normalise_overpass(elements: list[dict], location: str) -> list[dict[str, A
     for i, el in enumerate(elements):
         tags = el.get("tags", {})
         tourism_value = tags.get("tourism", "attraction")
+        category = tourism_value.replace("_", " ").title()
         results.append({
             "id": f"OSM-{el.get('id', i)}",
             "name": tags.get("name", "Unnamed Attraction"),
-            "category": tourism_value.replace("_", " ").title(),
+            "category": category,
+            "attraction_type": _attraction_type(category),
             "location": location,
             "rating": None,
             "review_count": None,

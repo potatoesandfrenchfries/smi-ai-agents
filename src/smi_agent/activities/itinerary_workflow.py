@@ -284,6 +284,7 @@ class ItineraryWorkflow:
             events.append(RankingFeedbackEvent(
                 section=seg["type"], candidate_id=candidate_id, action=action,
                 arm=arm, features=seg.get("rank_features") or {},
+                categorical=seg.get("rank_categorical") or {},
             ))
 
         if itinerary.dining_options:
@@ -292,6 +293,7 @@ class ItineraryWorkflow:
                 events.append(RankingFeedbackEvent(
                     section="restaurant", candidate_id=top["id"], action=action,
                     arm=top["rank_arm"], features=top.get("rank_features") or {},
+                    categorical=top.get("rank_categorical") or {},
                 ))
 
         return events
@@ -577,6 +579,7 @@ class ItineraryWorkflow:
                             [RankingFeedbackEvent(
                                 section=edit.section, candidate_id=edit.candidate_id, action="accepted",
                                 arm=picked["rank_arm"], features=picked.get("rank_features") or {},
+                                categorical=picked.get("rank_categorical") or {},
                             )],
                         )
 

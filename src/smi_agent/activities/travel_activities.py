@@ -314,14 +314,17 @@ async def _generate_itinerary(params: ItineraryParams) -> ItineraryResult:
     hotels, hotel_arm = await rank_candidates(
         params.hotels, sort_by=hotel_sort_by, price_field="total_price_gbp",
         rating_field="rating", proximity_field="distance_from_centre_km",
+        categorical_fields={"lodging_type": "lodging_type"},
         user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
     )
     restaurants, restaurant_arm = await rank_candidates(
         params.restaurants, sort_by="rating", price_field="avg_spend_per_person_gbp", rating_field="rating",
+        categorical_fields={"cuisine": "cuisine"},
         user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
     )
     attractions, attraction_arm = await rank_candidates(
         params.attractions, sort_by=attraction_sort_by, price_field="entry_fee_gbp", rating_field="rating",
+        categorical_fields={"attraction_type": "attraction_type"},
         user_id=params.user_id, store=ranking_store, rollout_pct=rollout_pct,
     )
     activity.logger.info(
@@ -489,7 +492,8 @@ class RankingFeedbackEvent:
     candidate_id: str
     action: str  # "accepted" | "rejected"
     arm: str  # "primitive" | "bandit" — whichever ranked this candidate
-    features: dict[str, float] = field(default_factory=dict)
+    features: dict[str, float] = field(default_factory=dict)  # continuous axis scores at decision time
+    categorical: dict[str, str] = field(default_factory=dict)  # categorical axis -> tag at decision time
 
 
 @dataclass
@@ -504,6 +508,12 @@ async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> Non
     """Persist HITL accept/reject events and update the user's learned
     ranking weights from them — the write side of providers/ranking/.
 
+    Two updates per event: update_axis_weights (dense — every axis moves a
+    little, continuous axes from their feature score, categorical axes from
+    how much we already believed in the tag the candidate had) and, for
+    each categorical axis present, update_tag_weight (sparse — only that
+    specific tag moves within its axis).
+
     Must be called as an activity: it does file I/O, which workflow.run()
     (replayed deterministically from history) can never do directly — same
     reason persist_trip_activity and record_workflow_metric_activity are
@@ -512,7 +522,13 @@ async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> Non
     import uuid
 
     from smi_agent.observability.metrics import track_agent_execution
-    from smi_agent.providers.ranking import FileRankingStore, RecommendationEvent, update_weights
+    from smi_agent.providers.ranking import (
+        FileRankingStore,
+        RecommendationEvent,
+        categorical_axis_score,
+        update_axis_weights,
+        update_tag_weight,
+    )
 
     if not params.events or not params.user_id:
         return
@@ -531,12 +547,20 @@ async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> Non
                 action=event.action,
                 arm=event.arm,
                 features=event.features,
+                categorical=event.categorical,
             ))
             reward = 1.0 if event.action == "accepted" else -1.0
-            weights = update_weights(weights, event.features, reward)
+
+            axis_scores = dict(event.features)
+            for axis, tag in event.categorical.items():
+                axis_scores[axis] = categorical_axis_score(weights, axis, tag)
+            weights = update_axis_weights(weights, axis_scores, reward)
+
+            for axis, tag in event.categorical.items():
+                weights = update_tag_weight(weights, axis, tag, reward)
 
         await store.save_weights(params.user_id, weights)
         activity.logger.info(
-            "Recorded %d ranking feedback event(s) for user %s — weights now %s (n=%d)",
-            len(params.events), params.user_id, weights.as_dict(), weights.event_count,
+            "Recorded %d ranking feedback event(s) for user %s — axis_weights now %s (n=%d)",
+            len(params.events), params.user_id, weights.axis_weights, weights.event_count,
         )

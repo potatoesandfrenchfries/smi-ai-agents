@@ -53,19 +53,22 @@ def annotate_reasons_personalized(
     price_field: str | None = None,
     rating_field: str | None = None,
     proximity_field: str | None = None,
+    categorical_fields: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Like ``annotate_reasons``, but ranks by a per-user learned blend over
-    normalized features (see providers/ranking/) instead of a single
-    ``sort_by`` criterion — the personalized ranking arm.
+    normalized continuous features and categorical tags (see
+    providers/ranking/) instead of a single ``sort_by`` criterion — the
+    personalized ranking arm.
 
     Unlike ``annotate_reasons``, which trusts the provider's own ordering
     and only annotates, this re-sorts by blended score descending: a
-    personalized order has no other source of truth to defer to. ``weights``
-    is a ``RankingWeights`` (or any object/mapping providing the same
-    price/rating/proximity keys) — typed loosely here to avoid a module-level
-    import cycle with providers/ranking.
+    personalized order has no other source of truth to defer to.
+    ``categorical_fields`` maps axis name -> candidate dict key, e.g.
+    {"cuisine": "cuisine"}; omit for sections with no categorical axis.
+    ``weights`` is a ``RankingWeights`` — typed loosely here to avoid a
+    module-level import cycle with providers/ranking.
     """
-    from smi_agent.providers.ranking.features import blend, score_candidates
+    from smi_agent.providers.ranking.features import blend, extract_categorical, score_candidates
 
     if not candidates:
         return candidates
@@ -74,23 +77,24 @@ def annotate_reasons_personalized(
     feature_scores = score_candidates(
         candidates, price_field=price_field, rating_field=rating_field, proximity_field=proximity_field,
     )
-    weights_dict = weights.as_dict() if hasattr(weights, "as_dict") else dict(weights)
+    categorical_values = extract_categorical(candidates, field_map=categorical_fields or {})
+
     scored = sorted(
-        zip(candidates, feature_scores, strict=True),
-        key=lambda pair: blend(pair[1], weights_dict),
+        zip(candidates, feature_scores, categorical_values, strict=True),
+        key=lambda triple: blend(triple[1], triple[2], weights),
         reverse=True,
     )
 
-    top_feature = max(weights_dict, key=weights_dict.get)
+    top_axis = max(weights.axis_weights, key=weights.axis_weights.get)
     return [
-        {**c, "reason": _personalized_reason(i == 0, top_feature, n)}
-        for i, (c, _feats) in enumerate(scored)
+        {**c, "reason": _personalized_reason(i == 0, top_axis, n)}
+        for i, (c, _feats, _cat) in enumerate(scored)
     ]
 
 
-def _personalized_reason(is_best: bool, top_feature: str, n: int) -> str:
+def _personalized_reason(is_best: bool, top_axis: str, n: int) -> str:
     if is_best:
-        return f"Best match for your usual preferences, weighted most on {top_feature} (of {n} option(s) considered)"
+        return f"Best match for your usual preferences, weighted most on {top_axis} (of {n} option(s) considered)"
     return f"Alternative option ranked by your usual preferences (of {n} option(s) considered)"
 
 

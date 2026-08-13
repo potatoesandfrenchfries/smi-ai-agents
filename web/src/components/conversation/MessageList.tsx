@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { ConversationMessageItem, StructuredResponse } from "../../api/types";
 import { parseStructuredContent } from "../../api/structuredContent";
 import { BlockRenderer } from "./BlockRenderer";
+import { MessageErrorBoundary } from "./MessageErrorBoundary";
 import styles from "./MessageList.module.css";
 
 export function MessageList({
@@ -40,11 +41,13 @@ export function MessageList({
             <div className={styles.roleLabel}>{m.role}</div>
             <div className={styles.bubble}>
               {blocks ? (
-                <div className={styles.blocks}>
-                  {blocks.map((b, i) => (
-                    <BlockRenderer key={i} block={b} />
-                  ))}
-                </div>
+                <MessageErrorBoundary>
+                  <div className={styles.blocks}>
+                    {blocks.map((b, i) => (
+                      <BlockRenderer key={i} block={b} />
+                    ))}
+                  </div>
+                </MessageErrorBoundary>
               ) : (
                 m.content
               )}
@@ -58,11 +61,13 @@ export function MessageList({
           <div className={styles.roleLabel}>assistant</div>
           <div className={styles.bubble}>
             {structuredResponse ? (
-              <div className={styles.blocks}>
-                {structuredResponse.blocks.map((b, i) => (
-                  <BlockRenderer key={i} block={b} />
-                ))}
-              </div>
+              <MessageErrorBoundary>
+                <div className={styles.blocks}>
+                  {structuredResponse.blocks.map((b, i) => (
+                    <BlockRenderer key={i} block={b} />
+                  ))}
+                </div>
+              </MessageErrorBoundary>
             ) : (
               <>
                 {streamingText}

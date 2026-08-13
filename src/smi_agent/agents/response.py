@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── Block content models ──────────────────────────────────────────────────────
 
@@ -155,6 +155,26 @@ BlockType = Literal[
 ]
 
 
+# Ties `type` to the content model it must validate as. Plain union validation
+# on `content` alone isn't enough — every field on SeparatorContent is
+# optional, so e.g. {"type": "list", "content": {"label": null}} (a block the
+# LLM mislabeled) validates fine as SeparatorContent even though `type` says
+# "list", and the frontend renderer picks its component from `type` alone and
+# crashes on the missing `items`. See _validate_content_matches_type below.
+_BLOCK_CONTENT_MODELS: dict[str, type[BaseModel]] = {
+    "text": TextContent,
+    "table": TableContent,
+    "entity_card": EntityCardContent,
+    "graph": GraphContent,
+    "metric_row": MetricRowContent,
+    "list": ListContent,
+    "action_buttons": ActionButtonsContent,
+    "code": CodeContent,
+    "error": ErrorContent,
+    "separator": SeparatorContent,
+}
+
+
 class ContentBlock(BaseModel):
     """A single renderable block in the response."""
 
@@ -171,6 +191,19 @@ class ContentBlock(BaseModel):
         | ErrorContent
         | SeparatorContent
     )
+
+    @model_validator(mode="after")
+    def _validate_content_matches_type(self) -> ContentBlock:
+        expected = _BLOCK_CONTENT_MODELS[self.type]
+        if not isinstance(self.content, expected):
+            # `content` validated as *some* union member (Pydantic tries each
+            # in turn), just not the one `type` declares — re-validate the
+            # same data against the correct model instead of trusting the
+            # mismatched guess. Fails closed: callers (runtime.py's
+            # _parse_block) catch this and drop or downgrade the block rather
+            # than shipping a type/content pair the frontend can't render.
+            self.content = expected.model_validate(self.content.model_dump())
+        return self
 
 
 # ── Envelope models ──────────────────────────────────────────────────────────

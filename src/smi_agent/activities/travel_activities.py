@@ -575,3 +575,4 @@ async def record_ranking_feedback_activity(params: RankingFeedbackParams) -> Non
             "Recorded %d ranking feedback event(s) for user %s — axis_weights now %s (n=%d)",
             len(params.events), params.user_id, weights.axis_weights, weights.event_count,
         )
+

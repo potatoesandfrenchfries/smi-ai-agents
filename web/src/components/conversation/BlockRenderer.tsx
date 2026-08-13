@@ -9,7 +9,18 @@ import type {
 } from "../../api/types";
 import styles from "./BlockRenderer.module.css";
 
-/** Renders the canonical StructuredResponse block union (agents/response.py). */
+/**
+ * Renders the canonical StructuredResponse block union (agents/response.py).
+ *
+ * `block.content`'s shape is only as trustworthy as the LLM output it came
+ * from — agents/response.py's ContentBlock validator rejects a `type`/
+ * `content` mismatch going forward, but that doesn't retroactively fix
+ * messages already persisted before the validator existed. Each case below
+ * checks its required array field is actually an array before mapping over
+ * it, so one malformed block renders as nothing instead of throwing and
+ * taking the whole page blank (no error boundary above this recovers from
+ * that — see MessageList.tsx's use of ErrorBoundary for the last-resort net).
+ */
 export function BlockRenderer({ block }: { block: ContentBlock }) {
   switch (block.type) {
     case "text": {
@@ -26,6 +37,7 @@ export function BlockRenderer({ block }: { block: ContentBlock }) {
     }
     case "list": {
       const c = block.content as ListContent;
+      if (!Array.isArray(c.items)) return null;
       const Tag = c.style === "numbered" ? "ol" : "ul";
       return (
         <div className={styles.blockGroup}>
@@ -42,6 +54,7 @@ export function BlockRenderer({ block }: { block: ContentBlock }) {
     }
     case "table": {
       const c = block.content as TableContent;
+      if (!Array.isArray(c.columns) || !Array.isArray(c.rows)) return null;
       return (
         <div className={styles.blockGroup}>
           <div className={styles.blockTitle}>{c.title}</div>
@@ -70,6 +83,7 @@ export function BlockRenderer({ block }: { block: ContentBlock }) {
     }
     case "metric_row": {
       const c = block.content as MetricRowContent;
+      if (!Array.isArray(c.metrics)) return null;
       return (
         <div className={styles.metricRow}>
           {c.metrics.map((m) => (
@@ -86,6 +100,7 @@ export function BlockRenderer({ block }: { block: ContentBlock }) {
     }
     case "action_buttons": {
       const c = block.content as ActionButtonsContent;
+      if (!Array.isArray(c.actions)) return null;
       return (
         <div className={styles.actions}>
           {c.actions.map((a) => (
